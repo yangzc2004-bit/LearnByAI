@@ -212,6 +212,39 @@ test("course planning runtime keeps web research and JSON stages resilient", () 
   assert.match(clientSource, /runInBatches\(skeleton\.chapters,\s*2/u);
   assert.match(clientSource, /buildChapterContractPrompt/u);
   assert.match(clientSource, /buildChapterContractCompactPrompt/u);
+  assert.match(clientSource, /planningCheckpoint/u);
+  assert.match(clientSource, /coursePlannerBudgets/u);
+  assert.match(clientSource, /已恢复完成的章节路线/u);
+  assert.match(clientSource, /contractRetry/u);
+  assert.match(webResearchSource, /provider:\s*"exa"/u);
+});
+
+test("course planning prompts require explicit transitions at section boundaries", () => {
+  const input = {
+    topic: "理论生态学",
+    goal: "连接经典理论、计算生态学、控制论与智能体方法",
+    background: "具备生态学与数学基础",
+    styles: ["rigor"] as Course["styles"],
+    learningMode: "standard" as const,
+    chapterCount: 12,
+    difficulty: "research" as const,
+    contentMode: "textbook" as const,
+  };
+  const skeletonPrompt = buildCourseSkeletonPrompt(input);
+  const contractPrompt = buildChapterContractPrompt(input, makeSkeleton(), {
+    targetLearner: "研究生",
+    finalOutcomes: ["建立跨范式建模能力"],
+    teachingStyle: "正式教材",
+    prerequisites: ["生态学", "数学"],
+    globalNarrative: "经典理论到计算与智能方法",
+    terminology: [],
+    chapterDependencies: [],
+  }, 0);
+
+  assert.match(skeletonPrompt, /为什么经典理论需要新工具/u);
+  assert.match(skeletonPrompt, /控制论.*智能体与 AI/u);
+  assert.match(skeletonPrompt, /ABM.*局部规则涌现/u);
+  assert.match(contractPrompt, /禁止泛泛写“承上启下”/u);
 });
 
 function makeCourse(depthWeight: Chapter["depthWeight"]): Course {

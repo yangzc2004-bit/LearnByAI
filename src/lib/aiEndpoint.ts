@@ -1,4 +1,12 @@
 export function chatCompletionsUrl(baseUrl: string) {
+  return providerEndpointUrl(baseUrl, "chat/completions");
+}
+
+export function responsesUrl(baseUrl: string) {
+  return providerEndpointUrl(baseUrl, "responses");
+}
+
+function providerEndpointUrl(baseUrl: string, endpoint: "chat/completions" | "responses") {
   const trimmed = baseUrl.trim();
   if (!trimmed) {
     throw new Error("AI base URL is not configured.");
@@ -19,9 +27,11 @@ export function chatCompletionsUrl(baseUrl: string) {
   url.hash = "";
 
   let pathname = url.pathname.replace(/\/+$/u, "");
-  pathname = pathname.replace(/\/chat\/completions$/iu, "");
+  pathname = pathname
+    .replace(/\/chat\/completions$/iu, "")
+    .replace(/\/responses$/iu, "");
   if (!pathname || pathname === "/") pathname = "/v1";
 
-  url.pathname = `${pathname}/chat/completions`;
+  url.pathname = `${pathname}/${endpoint}`;
   return url.toString().replace(/\/$/u, "");
 }

@@ -19,6 +19,12 @@ const BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/12
  * 未配置 KIMI_SEARCH_API_KEY 时本层直接跳过。
  */
 type KimiSearchConfig = { apiKey: string; baseUrl: string; model: string };
+export type CourseResearchResult = {
+  brief: string;
+  provider: "exa" | "stepfun" | "kimi";
+  query: string;
+  resultCount?: number;
+};
 
 function getKimiSearchConfig(): KimiSearchConfig | undefined {
   const apiKey = process.env.KIMI_SEARCH_API_KEY;
@@ -46,7 +52,7 @@ type StepResult = {
 export async function researchLatestCourseKnowledge(
   input: CourseResearchInput,
   overrides?: ModelOverrides,
-): Promise<string | undefined> {
+): Promise<CourseResearchResult | undefined> {
   const query = await resolveResearchQuery(input, overrides);
   if (!query) {
     console.warn("[webResearch] 关键词提取失败，跳过联网检索");
@@ -56,7 +62,8 @@ export async function researchLatestCourseKnowledge(
   // 第一层：Exa
   if (process.env.EXA_API_KEY) {
     try {
-      return await searchExa(query);
+      const result = await searchExa(query);
+      return { ...result, provider: "exa", query };
     } catch (error) {
       console.warn("[webResearch] Exa 失败，尝试 StepFun:", safeErrorMessage(error, "Exa error"));
     }
@@ -67,7 +74,8 @@ export async function researchLatestCourseKnowledge(
   // 第二层：StepFun
   if (process.env.STEP_SEARCH_API_KEY) {
     try {
-      return await searchStep(query);
+      const result = await searchStep(query);
+      return { ...result, provider: "stepfun", query };
     } catch (error) {
       console.warn("[webResearch] StepFun 失败，尝试 Kimi:", safeErrorMessage(error, "StepFun error"));
     }
@@ -79,7 +87,8 @@ export async function researchLatestCourseKnowledge(
   const kimiConfig = getKimiSearchConfig();
   if (kimiConfig) {
     try {
-      return await searchKimi(query, kimiConfig);
+      const result = await searchKimi(query, kimiConfig);
+      return { ...result, provider: "kimi", query };
     } catch (error) {
       console.warn("[webResearch] Kimi 搜索失败，跳过联网检索:", safeErrorMessage(error, "Kimi search error"));
     }
@@ -137,7 +146,7 @@ function normalizeQuery(value: unknown) {
     .slice(0, 240);
 }
 
-async function searchExa(query: string): Promise<string> {
+async function searchExa(query: string): Promise<{ brief: string; resultCount: number }> {
   const apiKey = process.env.EXA_API_KEY!;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), EXA_TIMEOUT_MS);
@@ -171,21 +180,24 @@ async function searchExa(query: string): Promise<string> {
     const results = data.results ?? [];
     if (!results.length) throw new Error("Exa 未返回任何结果");
 
-    return formatResults(
-      query,
-      results.map((r) => ({
+    return {
+      brief: formatResults(
+        query,
+        results.map((r) => ({
         title: r.title ?? r.url,
         date: r.publishedDate?.slice(0, 10),
         snippet: r.highlights?.[0] ?? "",
         url: r.url,
-      })),
-    );
+        })),
+      ),
+      resultCount: results.length,
+    };
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function searchStep(query: string): Promise<string> {
+async function searchStep(query: string): Promise<{ brief: string; resultCount: number }> {
   const apiKey = process.env.STEP_SEARCH_API_KEY!;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), STEP_TIMEOUT_MS);
@@ -211,21 +223,24 @@ async function searchStep(query: string): Promise<string> {
     const results = data.results ?? [];
     if (!results.length) throw new Error("StepFun 未返回任何结果");
 
-    return formatResults(
-      query,
-      results.map((r) => ({
+    return {
+      brief: formatResults(
+        query,
+        results.map((r) => ({
         title: r.title ?? r.url,
         date: r.time?.slice(0, 10) || undefined,
         snippet: (r.snippet || r.content || "").slice(0, 200),
         url: r.url,
-      })),
-    );
+        })),
+      ),
+      resultCount: results.length,
+    };
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function searchKimi(query: string, config: KimiSearchConfig): Promise<string> {
+async function searchKimi(query: string, config: KimiSearchConfig): Promise<{ brief: string; resultCount?: number }> {
   const headers = {
     Authorization: `Bearer ${config.apiKey}`,
     "Content-Type": "application/json",
@@ -269,7 +284,7 @@ async function searchKimi(query: string, config: KimiSearchConfig): Promise<stri
     if (!toolCalls?.length || choice1.finish_reason !== "tool_calls") {
       // Model answered directly without searching
       const directContent = choice1?.message?.content?.trim();
-      if (directContent) return `检索词：${query}\n${directContent.slice(0, 800)}`;
+      if (directContent) return { brief: `检索词：${query}\n${directContent.slice(0, 800)}` };
       throw new Error("Kimi 未触发搜索工具");
     }
 
@@ -313,7 +328,7 @@ async function searchKimi(query: string, config: KimiSearchConfig): Promise<stri
     const content = data2.choices[0]?.message?.content?.trim();
     if (!content) throw new Error("Kimi 搜索后未返回内容");
 
-    return `检索词：${query}\n${content.slice(0, 1000)}`;
+    return { brief: `检索词：${query}\n${content.slice(0, 1000)}` };
   } finally {
     clearTimeout(timeout);
   }

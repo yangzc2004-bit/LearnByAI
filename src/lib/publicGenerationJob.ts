@@ -3,6 +3,7 @@ import { GenerationJob } from "./types";
 export function publicGenerationJob(job: GenerationJob): GenerationJob {
   const publicJob = { ...job };
   delete publicJob.modelOverrides;
+  delete publicJob.planningCheckpoint;
   return publicJob;
 }
 

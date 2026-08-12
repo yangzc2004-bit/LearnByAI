@@ -20,6 +20,11 @@ test("public generation jobs do not expose model override secrets", () => {
         model: "mimo-v2.5-pro",
       },
     },
+    planningCheckpoint: {
+      researchCompleted: true,
+      researchBrief: "private research brief",
+      skeleton: { profile: "private" },
+    },
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   } as const;
@@ -27,7 +32,9 @@ test("public generation jobs do not expose model override secrets", () => {
   const publicJob = publicGenerationJob(job);
 
   assert.equal(publicJob.modelOverrides, undefined);
+  assert.equal(publicJob.planningCheckpoint, undefined);
   assert.doesNotMatch(JSON.stringify(publicJob), /sk-secret/u);
+  assert.doesNotMatch(JSON.stringify(publicJob), /private research brief/u);
 });
 
 test("worker request source includes saved model overrides", () => {

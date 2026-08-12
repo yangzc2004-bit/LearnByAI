@@ -1279,6 +1279,25 @@ export async function planCourseOutline(
 ): Promise<CourseGeneration> {
   const maxRetries = 2;
   let lastError: unknown;
+  let checkpointState = getGenerationJob(jobId)?.planningCheckpoint ?? {};
+  let checkpointWrite = Promise.resolve();
+  const saveCheckpoint = (patch: NonNullable<GenerationJob["planningCheckpoint"]>) => {
+    checkpointState = {
+      ...checkpointState,
+      ...patch,
+      chapterContracts: {
+        ...(checkpointState.chapterContracts ?? {}),
+        ...(patch.chapterContracts ?? {}),
+      },
+    };
+    const snapshot = structuredClone(checkpointState);
+    checkpointWrite = checkpointWrite.then(async () => {
+      const updatedJob = patchGenerationJob(jobId, { planningCheckpoint: snapshot });
+      if (updatedJob) await options.onJobUpdate?.(updatedJob);
+    });
+    return checkpointWrite;
+  };
+  const budgets = coursePlannerBudgets(input);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -1291,28 +1310,48 @@ export async function planCourseOutline(
         await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
       }
 
-      const researchDate = new Date().toISOString().slice(0, 10);
-      let researchBrief: string | undefined;
+      const researchDate = checkpointState.researchDate ?? new Date().toISOString().slice(0, 10);
+      let researchBrief = checkpointState.researchBrief;
 
       if (input.includeRecentResearch) {
-        const researchStartedJob = appendJobEvent(jobId, {
-          agent: "ARCHITECT",
-          status: "running",
-          message: "正在联网检索最新论文与领域进展。",
-        }, { preserveJobStatus: true });
-        if (researchStartedJob) await options.onJobUpdate?.(researchStartedJob);
+        if (checkpointState.researchCompleted) {
+          const researchResumedJob = appendJobEvent(jobId, {
+            agent: "ARCHITECT",
+            status: "running",
+            message: `已恢复联网检索结果${checkpointState.researchProvider ? `（${checkpointState.researchProvider}）` : ""}，无需重复检索。`,
+          }, { preserveJobStatus: true });
+          if (researchResumedJob) await options.onJobUpdate?.(researchResumedJob);
+        } else {
+          const researchStartedJob = appendJobEvent(jobId, {
+            agent: "ARCHITECT",
+            status: "running",
+            message: "正在联网检索最新论文与领域进展。",
+          }, { preserveJobStatus: true });
+          if (researchStartedJob) await options.onJobUpdate?.(researchStartedJob);
 
-        researchBrief = await researchLatestCourseKnowledge(input, options.overrides).catch((error) => {
-          console.warn("[coursePlanner] research failed; continuing without web research:", safeErrorMessage(error, "research failed"));
-          return undefined;
-        });
+          const researchResult = await researchLatestCourseKnowledge(input, options.overrides).catch((error) => {
+            console.warn("[coursePlanner] research failed; continuing without web research:", safeErrorMessage(error, "research failed"));
+            return undefined;
+          });
+          researchBrief = researchResult?.brief;
+          await saveCheckpoint({
+            researchCompleted: true,
+            researchDate,
+            researchBrief,
+            researchProvider: researchResult?.provider,
+            researchQuery: researchResult?.query,
+            researchResultCount: researchResult?.resultCount,
+          });
 
-        const researchCompletedJob = appendJobEvent(jobId, {
-          agent: "ARCHITECT",
-          status: "running",
-          message: `${researchBrief ? "检索完成，开始整合检索资料规划课程。" : "联网检索暂时不可用，已跳过，直接规划课程。"}`,
-        }, { preserveJobStatus: true });
-        if (researchCompletedJob) await options.onJobUpdate?.(researchCompletedJob);
+          const researchCompletedJob = appendJobEvent(jobId, {
+            agent: "ARCHITECT",
+            status: "running",
+            message: researchBrief
+              ? `联网检索完成：${researchResult?.provider ?? "unknown"}${researchResult?.resultCount ? `，获得 ${researchResult.resultCount} 条来源` : ""}。`
+              : "联网检索暂时不可用，已跳过，直接规划课程。",
+          }, { preserveJobStatus: true });
+          if (researchCompletedJob) await options.onJobUpdate?.(researchCompletedJob);
+        }
       } else {
         const researchSkippedJob = appendJobEvent(jobId, {
           agent: "ARCHITECT",
@@ -1328,24 +1367,36 @@ export async function planCourseOutline(
         researchDate,
       };
 
-      const skeletonJob = appendJobEvent(jobId, {
-        agent: "ARCHITECT",
-        status: "running",
-        message: "正在生成章节路线。",
-      }, { preserveJobStatus: true });
-      if (skeletonJob) await options.onJobUpdate?.(skeletonJob);
+      let skeleton = checkpointState.skeleton as CourseSkeleton | undefined;
+      if (skeleton) {
+        assertCourseSkeleton(skeleton);
+        const resumedSkeletonJob = appendJobEvent(jobId, {
+          agent: "ARCHITECT",
+          status: "running",
+          message: "已恢复完成的章节路线，无需重新生成。",
+        }, { preserveJobStatus: true });
+        if (resumedSkeletonJob) await options.onJobUpdate?.(resumedSkeletonJob);
+      } else {
+        const skeletonJob = appendJobEvent(jobId, {
+          agent: "ARCHITECT",
+          status: "running",
+          message: "正在生成章节路线。",
+        }, { preserveJobStatus: true });
+        if (skeletonJob) await options.onJobUpdate?.(skeletonJob);
 
-      const skeleton = await dispatchParsedCoursePlannerStage<CourseSkeleton>(
-        "章节路线",
-        () => buildCourseSkeletonPrompt(plannerInput),
-        (reason) => buildCourseSkeletonCompactPrompt(plannerInput, reason),
-        jobId,
-        options.overrides,
-        8192,
-        4096,
-        options.onJobUpdate,
-        assertCourseSkeleton,
-      );
+        skeleton = await dispatchParsedCoursePlannerStage<CourseSkeleton>(
+          "章节路线",
+          () => buildCourseSkeletonPrompt(plannerInput),
+          (reason) => buildCourseSkeletonCompactPrompt(plannerInput, reason),
+          jobId,
+          options.overrides,
+          budgets.skeleton,
+          budgets.skeletonRetry,
+          options.onJobUpdate,
+          assertCourseSkeleton,
+        );
+        await saveCheckpoint({ skeleton });
+      }
 
       const bibleJob = appendJobEvent(jobId, {
         agent: "ARCHITECT",
@@ -1354,18 +1405,30 @@ export async function planCourseOutline(
       }, { preserveJobStatus: true });
       if (bibleJob) await options.onJobUpdate?.(bibleJob);
 
-      const biblePayload = await dispatchParsedCoursePlannerStage<{ courseBible: CourseBibleCore }>(
-        "Course Bible",
-        () => buildCourseBiblePrompt(plannerInput, skeleton),
-        (reason) => buildCourseBibleCompactPrompt(plannerInput, skeleton, reason),
-        jobId,
-        options.overrides,
-        4096,
-        3072,
-        options.onJobUpdate,
-        (value) => assertCourseBibleCore(value.courseBible, skeleton),
-      );
-      const courseBibleCore = biblePayload.courseBible;
+      let courseBibleCore = checkpointState.courseBibleCore as CourseBibleCore | undefined;
+      if (courseBibleCore) {
+        assertCourseBibleCore(courseBibleCore, skeleton);
+        const resumedBibleJob = appendJobEvent(jobId, {
+          agent: "ARCHITECT",
+          status: "running",
+          message: "已恢复完成的 Course Bible，无需重新生成。",
+        }, { preserveJobStatus: true });
+        if (resumedBibleJob) await options.onJobUpdate?.(resumedBibleJob);
+      } else {
+        const biblePayload = await dispatchParsedCoursePlannerStage<{ courseBible: CourseBibleCore }>(
+          "Course Bible",
+          () => buildCourseBiblePrompt(plannerInput, skeleton),
+          (reason) => buildCourseBibleCompactPrompt(plannerInput, skeleton, reason),
+          jobId,
+          options.overrides,
+          budgets.bible,
+          budgets.bibleRetry,
+          options.onJobUpdate,
+          (value) => assertCourseBibleCore(value.courseBible, skeleton),
+        );
+        courseBibleCore = biblePayload.courseBible;
+        await saveCheckpoint({ courseBibleCore });
+      }
 
       const contractsJob = appendJobEvent(jobId, {
         agent: "ARCHITECT",
@@ -1375,6 +1438,12 @@ export async function planCourseOutline(
       if (contractsJob) await options.onJobUpdate?.(contractsJob);
 
       const chapterContracts = await runInBatches(skeleton.chapters, 2, async (_chapter, index) => {
+        const checkpointKey = String(index);
+        const savedContract = checkpointState.chapterContracts?.[checkpointKey];
+        if (savedContract) {
+          assertChapterContract(savedContract, skeleton.chapters[index]?.title ?? "");
+          return savedContract;
+        }
         const contractJob = appendJobEvent(jobId, {
           agent: "ARCHITECT",
           status: "running",
@@ -1388,14 +1457,17 @@ export async function planCourseOutline(
           (reason) => buildChapterContractCompactPrompt(plannerInput, skeleton, courseBibleCore, index, reason),
           jobId,
           options.overrides,
-          2048,
-          1536,
+          budgets.contract,
+          budgets.contractRetry,
           options.onJobUpdate,
           (value) => assertChapterContract(unwrapChapterContract(value), skeleton.chapters[index]?.title ?? ""),
         );
-        return unwrapChapterContract(contractPayload);
+        const contract = unwrapChapterContract(contractPayload);
+        await saveCheckpoint({ chapterContracts: { [checkpointKey]: contract } });
+        return contract;
       });
 
+      await checkpointWrite;
       const courseBible: CourseBible = {
         ...courseBibleCore,
         chapterContracts,
@@ -1446,6 +1518,23 @@ function dispatchCoursePlannerStage(
     mock: () => "{}",
     onJobUpdate,
   });
+}
+
+function coursePlannerBudgets(input: CourseInput) {
+  const chapterScale = Math.max(0, input.chapterCount - 8);
+  const materialScale = Math.ceil(
+    ((input.courseRequirements?.length ?? 0)
+      + (input.referenceMaterial?.length ?? 0)
+      + (input.styleSample?.length ?? 0)) / 6_000,
+  );
+  return {
+    skeleton: Math.min(32_768, 12_288 + chapterScale * 512 + materialScale * 512),
+    skeletonRetry: Math.min(49_152, 20_480 + chapterScale * 768 + materialScale * 512),
+    bible: Math.min(32_768, 12_288 + chapterScale * 512 + materialScale * 512),
+    bibleRetry: Math.min(49_152, 20_480 + chapterScale * 768 + materialScale * 512),
+    contract: input.contentMode === "textbook" ? 6_144 : 4_096,
+    contractRetry: input.contentMode === "textbook" ? 10_240 : 8_192,
+  };
 }
 
 async function dispatchParsedCoursePlannerStage<T>(

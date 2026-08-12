@@ -255,6 +255,17 @@ export type GenerationJob = {
   lockedUntil?: string;
   attempts?: number;
   modelOverrides?: ModelOverrides;
+  planningCheckpoint?: {
+    researchCompleted?: boolean;
+    researchDate?: string;
+    researchBrief?: string;
+    researchProvider?: string;
+    researchQuery?: string;
+    researchResultCount?: number;
+    skeleton?: unknown;
+    courseBibleCore?: Omit<CourseBible, "chapterContracts">;
+    chapterContracts?: Record<string, ChapterContract>;
+  };
   /** Set when an admin cancels the job — distinguishes an intentional cancel from a real failure. */
   cancelledByAdmin?: boolean;
   /** Admin marked this failed job as handled; drops it from the attention badge/list. */

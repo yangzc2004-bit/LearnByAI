@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chatCompletionsUrl } from "../../src/lib/aiEndpoint";
+import { chatCompletionsUrl, responsesUrl } from "../../src/lib/aiEndpoint";
 
 test("chat completions endpoint accepts common OpenAI-compatible base URL shapes", () => {
   assert.equal(
@@ -18,6 +18,25 @@ test("chat completions endpoint accepts common OpenAI-compatible base URL shapes
   assert.equal(
     chatCompletionsUrl("https://api.yzccc.cloud/v1/chat/completions"),
     "https://api.yzccc.cloud/v1/chat/completions",
+  );
+});
+
+test("responses endpoint accepts common OpenAI-compatible base URL shapes", () => {
+  assert.equal(
+    responsesUrl("https://api.deepseek.com"),
+    "https://api.deepseek.com/v1/responses",
+  );
+  assert.equal(
+    responsesUrl("https://api.deepseek.com/v1"),
+    "https://api.deepseek.com/v1/responses",
+  );
+  assert.equal(
+    responsesUrl("https://api.deepseek.com/v1/chat/completions"),
+    "https://api.deepseek.com/v1/responses",
+  );
+  assert.equal(
+    chatCompletionsUrl("https://api.deepseek.com/v1/responses"),
+    "https://api.deepseek.com/v1/chat/completions",
   );
 });
 

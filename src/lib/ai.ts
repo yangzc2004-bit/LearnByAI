@@ -1,6 +1,6 @@
 import "server-only";
 
-import { chatCompletionsUrl } from "./aiEndpoint";
+import { chatCompletionsUrl, responsesUrl } from "./aiEndpoint";
 import { getAgentConfig, getBaseAIConfig } from "./config";
 import { extractJsonObjectText, repairInvalidJsonEscapes } from "./jsonRepair";
 import { ModelOverrides } from "./modelOverrides";
@@ -8,6 +8,23 @@ import { safeErrorMessage } from "./safeError";
 import { AgentName } from "./types";
 
 export const MODEL = getBaseAIConfig().model;
+type ProviderProtocol = "responses" | "chat_completions";
+type ChatTokenParameter = "max_tokens" | "max_completion_tokens";
+const protocolCache = new Map<string, ProviderProtocol>();
+const chatTokenParameterCache = new Map<string, ChatTokenParameter>();
+const responsesOmittedParametersCache = new Map<string, Set<"temperature" | "thinking">>();
+
+type GenerateTextOptions = {
+  agent?: AgentName;
+  maxTokens?: number;
+  temperature?: number;
+  timeoutMs?: number;
+  maxAttempts?: number;
+  stream?: boolean;
+  responseFormat?: "json_object";
+  overrides?: ModelOverrides;
+  onChunk?: (chunk: string) => void;
+};
 
 export function hasAI() {
   return Boolean(getBaseAIConfig().apiKey);
@@ -15,18 +32,8 @@ export function hasAI() {
 
 export async function generateText(
   prompt: string,
-  options?: {
-    agent?: AgentName;
-    maxTokens?: number;
-    temperature?: number;
-    timeoutMs?: number;
-    maxAttempts?: number;
-    stream?: boolean;
-    responseFormat?: "json_object";
-    overrides?: ModelOverrides;
-    onChunk?: (chunk: string) => void;
-  },
-) {
+  options?: GenerateTextOptions,
+): Promise<string> {
   if (process.env.AI_MOCK_MODE === "true") {
     throw new Error("AI_MOCK_MODE enabled; provider calls are disabled");
   }
@@ -35,6 +42,36 @@ export async function generateText(
   const config = options?.agent ? getAgentConfig(options.agent, overrides) : getBaseAIConfig(overrides);
   if (!config.apiKey) throw new Error("模型 API Key 未配置，请先在「模型设置」中填写并保存。");
 
+  const protocolKey = `${config.baseUrl}\n${config.model}`;
+  if (protocolCache.get(protocolKey) !== "chat_completions") {
+    try {
+      const text = await generateResponsesText(prompt, options, config);
+      protocolCache.set(protocolKey, "responses");
+      return text;
+    } catch (error) {
+      if (!(error instanceof ResponsesUnsupportedError)) throw error;
+      protocolCache.set(protocolKey, "chat_completions");
+      console.info(JSON.stringify({
+        event: "learnbyai.ai_protocol_fallback",
+        at: new Date().toISOString(),
+        model: config.model,
+        endpoint: publicEndpoint(responsesUrl(config.baseUrl)),
+        from: "responses",
+        to: "chat_completions",
+        reason: safeErrorMessage(error, "Responses API unsupported"),
+      }));
+    }
+  }
+
+  return generateChatCompletionsText(prompt, options, config);
+}
+
+async function generateChatCompletionsText(
+  prompt: string,
+  options: GenerateTextOptions | undefined,
+  config: AIConfig,
+  tokenParameter = chatTokenParameterCache.get(`${config.baseUrl}\n${config.model}`) ?? "max_tokens",
+): Promise<string> {
   const maxAttempts = normalizeMaxAttempts(options?.maxAttempts);
   let lastError = "";
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -52,6 +89,8 @@ export async function generateText(
         stream,
         attempt: attempt + 1,
         mode: "primary",
+        protocol: "chat_completions",
+        maxOutputTokens: options?.maxTokens ?? config.maxTokens,
       });
       const response = await fetch(endpoint, {
         method: "POST",
@@ -60,7 +99,7 @@ export async function generateText(
           Accept: stream ? "application/json, text/event-stream" : "application/json",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(completionBody(prompt, options, config, stream)),
+        body: JSON.stringify(chatCompletionBody(prompt, options, config, stream, tokenParameter)),
         signal: controller.signal,
       });
 
@@ -95,8 +134,8 @@ export async function generateText(
             }
             throw new Error(lastError);
           }
-          if (completion.finishReason === "length") {
-            lastError = `${config.model} response truncated by token limit (finish_reason=length)`;
+          if (isOutputLimitReason(completion.finishReason)) {
+            lastError = `${config.model} response truncated by token limit (finish_reason=${completion.finishReason})`;
             if (canRetry) {
               await waitForRetry(attempt);
               continue;
@@ -116,8 +155,8 @@ export async function generateText(
           }
           throw new Error(lastError);
         }
-        if (completion.finishReason === "length") {
-          lastError = `${config.model} response truncated by token limit (finish_reason=length)`;
+        if (isOutputLimitReason(completion.finishReason)) {
+          lastError = `${config.model} response truncated by token limit (finish_reason=${completion.finishReason})`;
           if (canRetry) {
             await waitForRetry(attempt);
             continue;
@@ -128,6 +167,20 @@ export async function generateText(
       }
 
       const body = await response.text();
+      const alternateTokenParameter = detectAlternateTokenParameter(response.status, body, tokenParameter);
+      if (alternateTokenParameter) {
+        chatTokenParameterCache.set(`${config.baseUrl}\n${config.model}`, alternateTokenParameter);
+        return generateChatCompletionsText(prompt, options, config, alternateTokenParameter);
+      }
+      const providerMaxOutput = detectProviderMaxOutputTokens(response.status, body);
+      if (providerMaxOutput && providerMaxOutput < (options?.maxTokens ?? config.maxTokens)) {
+        return generateChatCompletionsText(
+          prompt,
+          { ...options, maxTokens: providerMaxOutput },
+          config,
+          tokenParameter,
+        );
+      }
       if (options?.responseFormat && attempt === 0 && isResponseFormatUnsupported(response.status, body)) {
         return generateText(prompt, {
           ...options,
@@ -158,9 +211,116 @@ export async function generateText(
 
 type AIConfig = ReturnType<typeof getBaseAIConfig>;
 
+class ResponsesUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ResponsesUnsupportedError";
+  }
+}
+
+async function generateResponsesText(
+  prompt: string,
+  options: GenerateTextOptions | undefined,
+  config: AIConfig,
+) {
+  const maxAttempts = normalizeMaxAttempts(options?.maxAttempts);
+  let lastError = "";
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const requestTimeoutMs = options?.timeoutMs ?? config.timeoutMs;
+    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+    const endpoint = responsesUrl(config.baseUrl);
+    const stream = completionStream(config.model, options?.stream);
+    const canRetry = attempt < maxAttempts - 1;
+
+    try {
+      logModelRequest({
+        agent: options?.agent ?? "default",
+        model: config.model,
+        endpoint,
+        stream,
+        attempt: attempt + 1,
+        mode: "primary",
+        protocol: "responses",
+        maxOutputTokens: options?.maxTokens ?? config.maxTokens,
+      });
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          Accept: stream ? "application/json, text/event-stream" : "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(responsesBody(prompt, options, config, stream)),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        if (isResponsesEndpointUnsupported(response.status, body)) {
+          throw new ResponsesUnsupportedError(
+            `${config.model} does not expose a compatible Responses API: ${response.status} ${safeErrorMessage(body, response.statusText)}`,
+          );
+        }
+        if (options?.responseFormat && isResponseFormatUnsupported(response.status, body)) {
+          return generateResponsesText(prompt, { ...options, responseFormat: undefined }, config);
+        }
+        const omittedParameter = detectUnsupportedResponsesParameter(response.status, body);
+        if (omittedParameter) {
+          const key = `${config.baseUrl}\n${config.model}`;
+          const omitted = new Set(responsesOmittedParametersCache.get(key) ?? []);
+          omitted.add(omittedParameter);
+          responsesOmittedParametersCache.set(key, omitted);
+          return generateResponsesText(prompt, options, config);
+        }
+        const providerMaxOutput = detectProviderMaxOutputTokens(response.status, body);
+        if (providerMaxOutput && providerMaxOutput < (options?.maxTokens ?? config.maxTokens)) {
+          return generateResponsesText(prompt, { ...options, maxTokens: providerMaxOutput }, config);
+        }
+        lastError = `${response.status} ${safeErrorMessage(body, response.statusText || "provider error")}`;
+        if (![429, 500, 502, 503, 504].includes(response.status) || !canRetry) {
+          throw new Error(`${config.model} Responses API request failed: ${lastError}`);
+        }
+        await waitForRetry(attempt);
+        continue;
+      }
+
+      let completion: CompletionExtraction;
+      if (response.headers.get("content-type")?.includes("text/event-stream")) {
+        completion = await readResponsesStreamingCompletion(response, controller.signal, options?.onChunk);
+      } else {
+        const data = await response.json();
+        if (isRecord(data) && Array.isArray(data.choices) && !Array.isArray(data.output)) {
+          throw new ResponsesUnsupportedError(`${config.model} /responses returned Chat Completions payload shape`);
+        }
+        completion = extractResponsesCompletion(data);
+      }
+      assertUsableCompletion(config.model, "Responses API", completion);
+      return completion.text;
+    } catch (error) {
+      if (error instanceof ResponsesUnsupportedError) throw error;
+      if (isAbortError(error)) {
+        lastError = `request timed out after ${requestTimeoutMs}ms`;
+      } else {
+        lastError = safeErrorMessage(error, `${config.model} Responses API request interrupted`);
+      }
+      if (canRetry && isTransientAIError(error)) {
+        await waitForRetry(attempt);
+        continue;
+      }
+      throw error instanceof Error ? error : new Error(lastError);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw new Error(`${config.model} Responses API request failed: ${lastError}`);
+}
+
 async function requestNonStreamingCompletion(
   prompt: string,
-  options: Parameters<typeof generateText>[1],
+  options: GenerateTextOptions | undefined,
   config: AIConfig,
   timeoutMs: number,
 ) {
@@ -175,6 +335,8 @@ async function requestNonStreamingCompletion(
       stream: false,
       attempt: 1,
       mode: "fallback",
+      protocol: "chat_completions",
+      maxOutputTokens: options?.maxTokens ?? config.maxTokens,
     });
     const response = await fetch(endpoint, {
       method: "POST",
@@ -183,7 +345,13 @@ async function requestNonStreamingCompletion(
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(completionBody(prompt, options, config, false)),
+      body: JSON.stringify(chatCompletionBody(
+        prompt,
+        options,
+        config,
+        false,
+        chatTokenParameterCache.get(`${config.baseUrl}\n${config.model}`) ?? "max_tokens",
+      )),
       signal: controller.signal,
     });
 
@@ -201,6 +369,9 @@ async function requestNonStreamingCompletion(
     const data = await response.json();
     const completion = extractCompletion(data);
     if (!completion.text) throw new Error(emptyCompletionError(config.model, "non-stream", completion));
+    if (isOutputLimitReason(completion.finishReason)) {
+      throw new Error(`${config.model} response truncated by token limit (finish_reason=${completion.finishReason})`);
+    }
     return completion.text;
   } catch (error) {
     if (isAbortError(error)) {
@@ -212,11 +383,12 @@ async function requestNonStreamingCompletion(
   }
 }
 
-function completionBody(
+function chatCompletionBody(
   prompt: string,
-  options: Parameters<typeof generateText>[1],
+  options: GenerateTextOptions | undefined,
   config: AIConfig,
   stream: boolean,
+  tokenParameter: ChatTokenParameter,
 ) {
   const responseFormat = options?.responseFormat === "json_object" ? "json_object" : undefined;
   const messages: { role: "system" | "user"; content: string }[] = [{ role: "user", content: prompt }];
@@ -226,15 +398,99 @@ function completionBody(
       content: "You are a JSON-only API. Return exactly one valid JSON object. Do not include markdown fences, explanations, or any text outside the JSON.",
     });
   }
+  const maxOutputTokens = options?.maxTokens ?? config.maxTokens;
   return {
     model: config.model,
     messages,
     temperature: compatibleTemperature(config.model, options?.temperature ?? config.temperature, config.thinking),
-    max_tokens: options?.maxTokens ?? config.maxTokens,
+    [tokenParameter]: maxOutputTokens,
     stream,
     ...(responseFormat ? { response_format: { type: responseFormat } } : {}),
     ...thinkingPayload(config.model, config.thinking),
   };
+}
+
+function responsesBody(
+  prompt: string,
+  options: GenerateTextOptions | undefined,
+  config: AIConfig,
+  stream: boolean,
+) {
+  const key = `${config.baseUrl}\n${config.model}`;
+  const omitted = responsesOmittedParametersCache.get(key) ?? new Set();
+  const body: Record<string, unknown> = {
+    model: config.model,
+    input: prompt,
+    max_output_tokens: options?.maxTokens ?? config.maxTokens,
+    stream,
+    ...(!omitted.has("temperature")
+      ? { temperature: compatibleTemperature(config.model, options?.temperature ?? config.temperature, config.thinking) }
+      : {}),
+    ...(options?.responseFormat === "json_object"
+      ? {
+          instructions: "Return exactly one valid JSON object. Do not include markdown fences, explanations, or text outside the JSON.",
+          text: { format: { type: "json_object" } },
+        }
+      : {}),
+    ...(!omitted.has("thinking") ? thinkingPayload(config.model, config.thinking) : {}),
+  };
+  return {
+    ...body,
+  };
+}
+
+function isResponsesEndpointUnsupported(status: number, body: string) {
+  if ([404, 405, 501].includes(status)) return true;
+  return [400, 422].includes(status)
+    && /responses|unknown endpoint|unsupported endpoint|not found|invalid url|unknown path/i.test(body);
+}
+
+function detectUnsupportedResponsesParameter(
+  status: number,
+  body: string,
+): "temperature" | "thinking" | undefined {
+  if (![400, 422].includes(status)) return undefined;
+  if (/temperature/i.test(body) && /unsupported|unknown|not allowed|invalid parameter/i.test(body)) {
+    return "temperature";
+  }
+  if (/thinking/i.test(body) && /unsupported|unknown|not allowed|invalid parameter/i.test(body)) {
+    return "thinking";
+  }
+  return undefined;
+}
+
+function detectAlternateTokenParameter(
+  status: number,
+  body: string,
+  current: ChatTokenParameter,
+): ChatTokenParameter | undefined {
+  if (![400, 422].includes(status)) return undefined;
+  if (current === "max_tokens"
+    && /max_tokens/i.test(body)
+    && /max_completion_tokens/i.test(body)
+    && /unsupported|use|instead|unknown|not supported/i.test(body)) {
+    return "max_completion_tokens";
+  }
+  if (current === "max_completion_tokens"
+    && /max_completion_tokens/i.test(body)
+    && /max_tokens/i.test(body)
+    && /unsupported|use|instead|unknown|not supported/i.test(body)) {
+    return "max_tokens";
+  }
+  return undefined;
+}
+
+function detectProviderMaxOutputTokens(status: number, body: string) {
+  if (![400, 413, 422].includes(status)) return undefined;
+  if (!/max(?:imum)?[_\s-]*(?:output|completion)?[_\s-]*tokens?|token limit|must be (?:less than|at most|<=)/i.test(body)) {
+    return undefined;
+  }
+  const candidates = [
+    ...body.matchAll(/(?:maximum|max(?:imum)?(?:[_\s-]*(?:output|completion))?[_\s-]*tokens?|at most|less than or equal to|<=)\D{0,32}(\d{3,7})/gi),
+  ]
+    .map((match) => Number(match[1]))
+    .filter((value) => Number.isFinite(value) && value >= 256);
+  return candidates.length ? Math.min(...candidates) : undefined;
 }
 
 function isResponseFormatUnsupported(status: number, body: string) {
@@ -270,6 +526,7 @@ type CompletionExtraction = {
   text: string;
   reasoningLength: number;
   finishReason?: string;
+  status?: string;
 };
 
 function emptyCompletionExtraction(): CompletionExtraction {
@@ -326,6 +583,68 @@ async function readStreamingCompletion(response: Response, signal: AbortSignal, 
   return completion;
 }
 
+async function readResponsesStreamingCompletion(
+  response: Response,
+  signal: AbortSignal,
+  onChunk?: (chunk: string) => void,
+) {
+  const completion = emptyCompletionExtraction();
+  const reader = response.body?.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  const consumeEvent = (raw: string) => {
+    const dataLines = raw
+      .split(/\r?\n/u)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim());
+    if (!dataLines.length) return;
+    const data = dataLines.join("\n");
+    if (!data || data === "[DONE]") return;
+    try {
+      const parsed = JSON.parse(data) as Record<string, unknown>;
+      const type = typeof parsed.type === "string" ? parsed.type : "";
+      if (type === "response.output_text.delta" && typeof parsed.delta === "string") {
+        completion.text += parsed.delta;
+        onChunk?.(parsed.delta);
+      } else if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
+        const final = extractResponsesCompletion(parsed.response);
+        if (!completion.text && final.text) completion.text = final.text;
+        completion.reasoningLength = Math.max(completion.reasoningLength, final.reasoningLength);
+        completion.finishReason = final.finishReason;
+        completion.status = final.status;
+      }
+    } catch {
+      // Ignore malformed provider keepalive events.
+    }
+  };
+
+  if (reader) {
+    const cancelReader = () => {
+      void reader.cancel().catch(() => undefined);
+    };
+    signal.addEventListener("abort", cancelReader, { once: true });
+    try {
+      while (true) {
+        throwIfAborted(signal);
+        const { done, value } = await reader.read();
+        throwIfAborted(signal);
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split(/\r?\n\r?\n/u);
+        buffer = events.pop() ?? "";
+        for (const event of events) consumeEvent(event);
+      }
+    } finally {
+      signal.removeEventListener("abort", cancelReader);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) consumeEvent(buffer);
+  }
+
+  return completion;
+}
+
 function throwIfAborted(signal: AbortSignal) {
   if (!signal.aborted) return;
   if (signal.reason instanceof Error) throw signal.reason;
@@ -373,6 +692,61 @@ function extractCompletion(data: unknown): CompletionExtraction {
   };
 }
 
+function extractResponsesCompletion(data: unknown): CompletionExtraction {
+  const record = isRecord(data) ? data : {};
+  const output = Array.isArray(record.output) ? record.output : [];
+  let text = "";
+  let reasoningLength = 0;
+
+  for (const item of output) {
+    if (!isRecord(item)) continue;
+    if (item.type === "reasoning") {
+      reasoningLength += JSON.stringify(item).length;
+      continue;
+    }
+    const content = Array.isArray(item.content) ? item.content : [];
+    for (const part of content) {
+      if (!isRecord(part)) continue;
+      if ((part.type === "output_text" || part.type === "text") && typeof part.text === "string") {
+        text += part.text;
+      }
+    }
+  }
+
+  const status = typeof record.status === "string" ? record.status : undefined;
+  const details = isRecord(record.incomplete_details) ? record.incomplete_details : {};
+  const finishReason = typeof details.reason === "string"
+    ? details.reason
+    : status === "incomplete"
+      ? "incomplete"
+      : undefined;
+  return { text, reasoningLength, finishReason, status };
+}
+
+function assertUsableCompletion(model: string, kind: string, completion: CompletionExtraction) {
+  if (completion.status === "failed") {
+    throw new Error(`${model} returned a failed ${kind} response`);
+  }
+  if (completion.status === "incomplete") {
+    throw new Error(
+      `${model} returned an incomplete ${kind} response${completion.finishReason ? ` (${completion.finishReason})` : ""}`,
+    );
+  }
+  if (isOutputLimitReason(completion.finishReason)) {
+    throw new Error(`${model} response truncated by token limit (${completion.finishReason})`);
+  }
+  if (!completion.text) {
+    throw new Error(emptyCompletionError(model, "response", completion));
+  }
+}
+
+function isOutputLimitReason(reason: string | undefined) {
+  return reason === "length"
+    || reason === "max_tokens"
+    || reason === "max_output_tokens"
+    || reason === "max_completion_tokens";
+}
+
 function emptyCompletionError(model: string, kind: "stream" | "response" | "non-stream", completion: CompletionExtraction) {
   let message = `${model} returned an empty ${kind} response`;
   if (completion.reasoningLength > 0) {
@@ -404,6 +778,8 @@ function logModelRequest(input: {
   stream: boolean;
   attempt: number;
   mode: "primary" | "fallback";
+  protocol: ProviderProtocol;
+  maxOutputTokens: number;
 }) {
   if (process.env.AI_REQUEST_LOGS === "false") return;
   console.info(JSON.stringify({
@@ -415,6 +791,8 @@ function logModelRequest(input: {
     stream: input.stream,
     attempt: input.attempt,
     mode: input.mode,
+    protocol: input.protocol,
+    maxOutputTokens: input.maxOutputTokens,
   }));
 }
 
@@ -429,6 +807,10 @@ function publicEndpoint(endpoint: string) {
   } catch {
     return "[invalid-endpoint]";
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 
