@@ -21,6 +21,7 @@ import type { CourseBibleCore, CourseSkeleton } from "../prompts/coursePlanner";
 import { buildFormatGuardPrompt, postRepairMarkdown, preRepairMarkdown } from "../prompts/formatGuard";
 import { runChapterQualityPipelineWithRepair } from "../quality/pipeline";
 import { safeErrorMessage } from "../safeError";
+import { assertChapterPositionRequirements } from "../courseRequirementConstraints";
 import { Chapter, ChapterContract, ChapterGenerateResponse, ContentMode, Course, CourseBible, CourseCreateResponse, CourseDifficulty, CourseInputMaterial, ExplanationStyle, GenerationJob, GenerationProfile, LearningMode, QualityIssue, QualityReport, RevisionMode, RevisionScope, Section } from "../types";
 import { researchLatestCourseKnowledge } from "../webResearch";
 import { dispatchAgentText } from "./dispatcher";
@@ -1281,6 +1282,14 @@ export async function planCourseOutline(
   let lastError: unknown;
   let checkpointState = getGenerationJob(jobId)?.planningCheckpoint ?? {};
   let checkpointWrite = Promise.resolve();
+  const persistCheckpoint = () => {
+    const snapshot = structuredClone(checkpointState);
+    checkpointWrite = checkpointWrite.then(async () => {
+      const updatedJob = patchGenerationJob(jobId, { planningCheckpoint: snapshot });
+      if (updatedJob) await options.onJobUpdate?.(updatedJob);
+    });
+    return checkpointWrite;
+  };
   const saveCheckpoint = (patch: NonNullable<GenerationJob["planningCheckpoint"]>) => {
     checkpointState = {
       ...checkpointState,
@@ -1290,12 +1299,7 @@ export async function planCourseOutline(
         ...(patch.chapterContracts ?? {}),
       },
     };
-    const snapshot = structuredClone(checkpointState);
-    checkpointWrite = checkpointWrite.then(async () => {
-      const updatedJob = patchGenerationJob(jobId, { planningCheckpoint: snapshot });
-      if (updatedJob) await options.onJobUpdate?.(updatedJob);
-    });
-    return checkpointWrite;
+    return persistCheckpoint();
   };
   const budgets = coursePlannerBudgets(input);
 
@@ -1369,14 +1373,35 @@ export async function planCourseOutline(
 
       let skeleton = checkpointState.skeleton as CourseSkeleton | undefined;
       if (skeleton) {
-        assertCourseSkeleton(skeleton);
-        const resumedSkeletonJob = appendJobEvent(jobId, {
-          agent: "ARCHITECT",
-          status: "running",
-          message: "已恢复完成的章节路线，无需重新生成。",
-        }, { preserveJobStatus: true });
-        if (resumedSkeletonJob) await options.onJobUpdate?.(resumedSkeletonJob);
-      } else {
+        try {
+          assertCourseSkeleton(skeleton, plannerInput);
+          const resumedSkeletonJob = appendJobEvent(jobId, {
+            agent: "ARCHITECT",
+            status: "running",
+            message: "已恢复完成的章节路线，无需重新生成。",
+          }, { preserveJobStatus: true });
+          if (resumedSkeletonJob) await options.onJobUpdate?.(resumedSkeletonJob);
+        } catch (error) {
+          checkpointState = {
+            researchCompleted: checkpointState.researchCompleted,
+            researchDate: checkpointState.researchDate,
+            researchBrief: checkpointState.researchBrief,
+            researchProvider: checkpointState.researchProvider,
+            researchQuery: checkpointState.researchQuery,
+            researchResultCount: checkpointState.researchResultCount,
+            chapterContracts: {},
+          };
+          await persistCheckpoint();
+          skeleton = undefined;
+          const invalidatedSkeletonJob = appendJobEvent(jobId, {
+            agent: "ARCHITECT",
+            status: "running",
+            message: `已丢弃不符合最新课程要求的旧章节路线，正在重新生成：${safeErrorMessage(error, "章节路线约束校验失败")}`,
+          }, { preserveJobStatus: true });
+          if (invalidatedSkeletonJob) await options.onJobUpdate?.(invalidatedSkeletonJob);
+        }
+      }
+      if (!skeleton) {
         const skeletonJob = appendJobEvent(jobId, {
           agent: "ARCHITECT",
           status: "running",
@@ -1393,7 +1418,7 @@ export async function planCourseOutline(
           budgets.skeleton,
           budgets.skeletonRetry,
           options.onJobUpdate,
-          assertCourseSkeleton,
+          (value) => assertCourseSkeleton(value, plannerInput),
         );
         await saveCheckpoint({ skeleton });
       }
@@ -1575,7 +1600,7 @@ async function dispatchParsedCoursePlannerStage<T>(
   }
 }
 
-function assertCourseSkeleton(skeleton: CourseSkeleton) {
+function assertCourseSkeleton(skeleton: CourseSkeleton, input?: CourseInput) {
   if (!skeleton.profile?.trim()) throw new Error("课程章节路线缺少 profile。");
   if (!Array.isArray(skeleton.chapters) || skeleton.chapters.length < 3 || skeleton.chapters.length > 20) {
     throw new Error("课程章节路线必须包含 3 到 20 章。");
@@ -1584,6 +1609,7 @@ function assertCourseSkeleton(skeleton: CourseSkeleton) {
   if (titles.some((title) => !title) || new Set(titles).size !== titles.length) {
     throw new Error("课程章节标题为空或重复。");
   }
+  assertChapterPositionRequirements(skeleton.chapters, input?.courseRequirements);
 }
 
 function assertCourseBibleCore(courseBible: CourseBibleCore | undefined, skeleton: CourseSkeleton) {
