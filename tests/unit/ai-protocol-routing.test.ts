@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { resolveAIProtocolOrder } from "../../src/lib/aiProtocol";
 
-test("structured JSON tasks prefer Responses with Chat fallback", () => {
+test("structured JSON tasks prefer widely-compatible Chat with Responses fallback", () => {
   assert.deepEqual(
     resolveAIProtocolOrder({ responseFormat: "json_object" }),
-    ["responses", "chat_completions"],
+    ["chat_completions", "responses"],
   );
 });
 
