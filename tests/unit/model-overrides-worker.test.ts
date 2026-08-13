@@ -127,6 +127,16 @@ test("structural chapter failures are escalated instead of chunk-repaired", () =
   assert.match(source, /withAuthorRewriteRequiredIssue/u);
 });
 
+test("chapter drafts reuse the contract-aware AUTHOR harness over Responses continuations", () => {
+  const source = readFileSync("src/lib/maol/client.ts", "utf8");
+
+  assert.match(source, /runChapterAuthorHarness/u);
+  assert.match(source, /buildChapterWriterPrompt/u);
+  assert.match(source, /protocol:\s*"responses"/u);
+  assert.match(source, /continueOnOutputLimit:\s*true/u);
+  assert.match(source, /maxContinuationSegments/u);
+});
+
 test("chunk repair output is validated before being accepted", () => {
   const source = readFileSync("src/lib/maol/client.ts", "utf8");
 

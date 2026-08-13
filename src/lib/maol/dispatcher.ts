@@ -1,4 +1,5 @@
 import { generateText } from "../ai";
+import { AIProtocolPreference } from "../aiProtocol";
 import { appendJobEvent } from "../jobs";
 import { ModelOverrides } from "../modelOverrides";
 import { safeErrorMessage } from "../safeError";
@@ -15,6 +16,9 @@ export async function dispatchAgentText(input: {
   maxAttempts?: number;
   stream?: boolean;
   responseFormat?: "json_object";
+  protocol?: AIProtocolPreference;
+  continueOnOutputLimit?: boolean;
+  maxContinuationSegments?: number;
   overrides?: ModelOverrides;
   mock?: () => string;
   onChunk?: (chunk: string) => void;
@@ -50,6 +54,9 @@ export async function dispatchAgentText(input: {
       maxAttempts: input.maxAttempts,
       stream: input.stream,
       responseFormat: input.responseFormat,
+      protocol: input.protocol,
+      continueOnOutputLimit: input.continueOnOutputLimit,
+      maxContinuationSegments: input.maxContinuationSegments,
       overrides: input.overrides,
       onChunk: input.onChunk,
     });

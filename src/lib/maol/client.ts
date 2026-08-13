@@ -208,17 +208,10 @@ export async function generateChapter(
   try {
     const lengthGuide = getChapterDepthGuide(chapter.depthWeight);
     const draft = preRepairMarkdown(
-      await dispatchAgentText({
-        agent: "AUTHOR",
+      await runChapterAuthorHarness(course, chapter, {
         jobId: job.id,
-        prompt: buildChapterWriterPrompt(course, chapter, {
-          chapterIndex: course.chapters.findIndex((item) => item.id === chapter.id),
-          chapters: course.chapters,
-        }),
-        temperature: 0.45,
         maxTokens: lengthGuide.maxTokens,
         overrides: options.overrides,
-        mock: () => createMockChapter(course.topic, chapter.title, course.goal),
         onJobUpdate: options.onJobUpdate,
       }),
     );
@@ -336,17 +329,10 @@ export async function generateChapterDraft(
       course,
       chapter,
       preRepairMarkdown(
-        await dispatchAgentText({
-          agent: "AUTHOR",
+        await runChapterAuthorHarness(course, chapter, {
           jobId: job.id,
-          prompt: buildChapterWriterPrompt(course, chapter, {
-            chapterIndex: course.chapters.findIndex((item) => item.id === chapter.id),
-            chapters: course.chapters,
-          }),
-          temperature: 0.45,
           maxTokens: lengthGuide.maxTokens,
           overrides: options.overrides,
-          mock: () => createMockChapter(course.topic, chapter.title, course.goal),
           onJobUpdate: options.onJobUpdate,
         }),
       ),
@@ -1542,6 +1528,37 @@ function dispatchCoursePlannerStage(
     overrides,
     mock: () => "{}",
     onJobUpdate,
+  });
+}
+
+async function runChapterAuthorHarness(
+  course: Course,
+  chapter: Chapter,
+  options: {
+    jobId: string;
+    maxTokens: number;
+    overrides?: ModelOverrides;
+    onJobUpdate?: (job: GenerationJob) => Promise<void> | void;
+  },
+) {
+  const chapterIndex = course.chapters.findIndex((item) => item.id === chapter.id);
+  const prompt = buildChapterWriterPrompt(course, chapter, {
+    chapterIndex,
+    chapters: course.chapters,
+  });
+
+  return dispatchAgentText({
+    agent: "AUTHOR",
+    jobId: options.jobId,
+    prompt,
+    temperature: 0.45,
+    maxTokens: options.maxTokens,
+    protocol: "responses",
+    continueOnOutputLimit: true,
+    maxContinuationSegments: chapter.depthWeight === "core" ? 6 : 4,
+    overrides: options.overrides,
+    mock: () => createMockChapter(course.topic, chapter.title, course.goal),
+    onJobUpdate: options.onJobUpdate,
   });
 }
 
