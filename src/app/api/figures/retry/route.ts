@@ -18,8 +18,12 @@ import type { Chapter, Course, FigurePlaceholder } from "@/lib/types";
 type RetryFigureInput = {
   courseId?: string;
   chapterId?: string;
-  /** "book-map" retries the course-level textbook map instead of a chapter figure. */
-  target?: "figure" | "book-map";
+  /**
+   * "book-map" retries the course-level textbook map.
+   * "failed-figure" targets only a persisted failed-figure marker, so a
+   * chapter with earlier successful figures never retries the wrong asset.
+   */
+  target?: "figure" | "book-map" | "failed-figure";
   label?: string;
   caption?: string;
   prompt?: string;
@@ -55,7 +59,9 @@ export async function POST(request: Request) {
   const chapterNumber = Math.max(0, course.chapters.findIndex((item) => item.id === chapter.id)) + 1;
   // A retry targets either an already-rendered figure or a failed-figure
   // marker (the case that needs retrying most).
-  const match = findFigure(content, body) ?? findFailedFigure(content, body);
+  const match = body.target === "failed-figure"
+    ? findFailedFigure(content, body)
+    : findFigure(content, body) ?? findFailedFigure(content, body);
   if (!match) return NextResponse.json({ error: "Figure not found" }, { status: 404 });
 
   const placeholder: FigurePlaceholder = {
