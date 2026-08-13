@@ -122,7 +122,6 @@ test("chapter author harness removes only a duplicated leading chapter heading f
   assert.equal(
     normalizeHarnessStageOutput(
       "# 第二章：种群动态模型\n\n## 2.4 密度制约\n\n正文。",
-      "第二章：种群动态模型",
       3,
     ),
     "## 2.4 密度制约\n\n正文。",
@@ -130,7 +129,6 @@ test("chapter author harness removes only a duplicated leading chapter heading f
   assert.equal(
     normalizeHarnessStageOutput(
       "## 2.4 密度制约\n\n正文。",
-      "第二章：种群动态模型",
       3,
     ),
     "## 2.4 密度制约\n\n正文。",
@@ -138,10 +136,16 @@ test("chapter author harness removes only a duplicated leading chapter heading f
   assert.equal(
     normalizeHarnessStageOutput(
       "# 第二章：种群动态模型\n\n## 2.1 指数增长\n\n正文。",
-      "第二章：种群动态模型",
       0,
     ),
     "# 第二章：种群动态模型\n\n## 2.1 指数增长\n\n正文。",
+  );
+  assert.equal(
+    normalizeHarnessStageOutput(
+      "# 2. 生态学基础概念与系统思维\n\n## 2.5 复杂性\n\n正文。",
+      4,
+    ),
+    "## 2.5 复杂性\n\n正文。",
   );
 });
 
