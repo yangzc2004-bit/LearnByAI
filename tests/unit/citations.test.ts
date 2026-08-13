@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildSectionIndex, extractCitations } from "../../src/lib/citations";
+import { buildSectionIndex, extractCitations, stripCitationMarkers } from "../../src/lib/citations";
 import type { Section } from "../../src/lib/types";
 
 function makeSection(id: string, order: number): Section {
@@ -51,4 +51,10 @@ test("extractCitations ignores non-marker brackets and empty input", () => {
   const index = new Map<string, string>([["§1", "s1"]]);
   assert.deepEqual(extractCitations("", index), []);
   assert.deepEqual(extractCitations("普通 [引用] 与 [§1.2] 都不算", index), []);
+});
+
+test("stripCitationMarkers removes [§n] markers from content", () => {
+  assert.equal(stripCitationMarkers("见 [§2] 与 [§1]，继续。"), "见  与 ，继续。");
+  assert.equal(stripCitationMarkers("无引用"), "无引用");
+  assert.equal(stripCitationMarkers(""), "");
 });

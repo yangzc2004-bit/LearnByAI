@@ -37,3 +37,8 @@ export function extractCitations(text: string, sectionIndex: Map<string, string>
 
   return citations;
 }
+
+/** Remove grounded `[§n]` markers from tutor answer content. */
+export function stripCitationMarkers(text: string): string {
+  return text.replace(/\[§\d+\]/gu, "");
+}

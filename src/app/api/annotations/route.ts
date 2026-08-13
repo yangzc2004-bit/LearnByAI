@@ -7,7 +7,7 @@ import { safeErrorMessage } from "@/lib/safeError";
 import { deleteServerAnnotation, getServerCourse, listServerAnnotations, saveServerAnnotation, saveServerGenerationJob } from "@/lib/serverStore";
 import { encodeSseEvent } from "@/lib/sse";
 import { resolveModelOverrides } from "@/lib/userModelConfig";
-import { buildSectionIndex, extractCitations } from "@/lib/citations";
+import { stripCitationMarkers } from "@/lib/citations";
 import { Annotation, Chapter, Course, Section } from "@/lib/types";
 
 const TUTOR_ROUTE_TIMEOUT_MS = 125_000;
@@ -84,15 +84,13 @@ export async function POST(request: Request) {
       const clientAnnotation = stripClientOnlyMessages(anchor.annotation);
       if (clientAnnotation) {
         const now = new Date().toISOString();
-        const citations = extractCitations(response.answer, buildSectionIndex(orderedSections(chapter)));
         annotation = clientAnnotation;
         annotation.messages = [
           ...annotation.messages,
           {
             id: crypto.randomUUID(),
             role: "assistant",
-            content: response.answer,
-            ...(citations.length ? { citations } : {}),
+            content: stripCitationMarkers(response.answer),
           },
         ];
         annotation.createdAt = annotation.createdAt ?? now;
@@ -169,15 +167,13 @@ async function handleStreamingPost(params: {
           const clientAnnotation = stripClientOnlyMessages(anchor.annotation);
           if (clientAnnotation) {
             const now = new Date().toISOString();
-            const citations = extractCitations(fullAnswer, buildSectionIndex(orderedSections(chapter)));
             const annotation = clientAnnotation;
             annotation.messages = [
               ...annotation.messages,
               {
                 id: crypto.randomUUID(),
                 role: "assistant",
-                content: fullAnswer,
-                ...(citations.length ? { citations } : {}),
+                content: stripCitationMarkers(fullAnswer),
               },
             ];
             annotation.createdAt = annotation.createdAt ?? now;

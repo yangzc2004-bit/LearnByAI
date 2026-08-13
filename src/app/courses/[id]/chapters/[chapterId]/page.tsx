@@ -177,10 +177,6 @@ export default function ReaderPage() {
     document.querySelector(`#section-${sectionId}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  function jumpToSection(sectionId: string) {
-    document.querySelector(`#section-${sectionId}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-
   function startPanelResize(event: MouseEvent<HTMLDivElement>, side: "toc" | "right") {
     event.preventDefault();
     const startX = event.clientX;
@@ -839,8 +835,6 @@ export default function ReaderPage() {
             tutor={tutor}
             courseId={id}
             chapterId={chapterId}
-            chapterSections={sections}
-            onCitationClick={jumpToSection}
             onClose={() => setPanel(null)}
           />
         )}

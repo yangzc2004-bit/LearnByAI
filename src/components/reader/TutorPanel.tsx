@@ -1,18 +1,16 @@
 "use client";
 
-import { FormEvent, useMemo, useRef, useState } from "react";
+import { FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowUp, Bot, MessageSquareQuote, SendHorizontal, Trash2, User, X } from "lucide-react";
-import { CitationChipData, MarkdownContent } from "@/components/MarkdownContent";
+import { Bot, MessageSquareQuote, SendHorizontal, Trash2, User, X } from "lucide-react";
+import { MarkdownContent } from "@/components/MarkdownContent";
 import { useTutor } from "@/lib/hooks/useTutor";
-import { Annotation, Section } from "@/lib/types";
+import { Annotation } from "@/lib/types";
 
 type TutorPanelProps = {
   tutor: ReturnType<typeof useTutor>;
   courseId: string;
   chapterId: string;
-  chapterSections: Section[];
-  onCitationClick: (sectionId: string) => void;
   onClose: () => void;
 };
 
@@ -20,8 +18,6 @@ export function TutorPanel({
   tutor,
   courseId,
   chapterId,
-  chapterSections,
-  onCitationClick,
   onClose,
 }: TutorPanelProps) {
   const router = useRouter();
@@ -32,11 +28,6 @@ export function TutorPanel({
   const inConversation = Boolean(active || target);
   const anchoredText = active?.selectedText ?? (target?.scope === "anchored" ? target.selectedText : undefined);
 
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const returnScrollRef = useRef(0);
-  const [returnable, setReturnable] = useState(false);
-
-  const citationMap = useMemo(() => buildCitationMap(chapterSections), [chapterSections]);
   const suggestions = quickQuestionsFor(Boolean(anchoredText));
 
   function submitQuestion(event: FormEvent<HTMLFormElement>) {
@@ -47,17 +38,6 @@ export function TutorPanel({
     void tutor.ask(question).then((sent) => {
       if (sent) input.value = "";
     }).catch(() => undefined);
-  }
-
-  function handleCitationClick(sectionId: string) {
-    returnScrollRef.current = scrollRef.current?.scrollTop ?? 0;
-    setReturnable(true);
-    onCitationClick(sectionId);
-  }
-
-  function returnToAnswer() {
-    if (scrollRef.current) scrollRef.current.scrollTop = returnScrollRef.current;
-    setReturnable(false);
   }
 
   function openThreadInContext(annotation: Annotation) {
@@ -83,7 +63,7 @@ export function TutorPanel({
         </button>
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
+      <div className="flex-1 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
         {inConversation ? (
           <div className="space-y-6">
             <div className="flex items-center justify-between gap-2">
@@ -94,14 +74,6 @@ export function TutorPanel({
                 >
                   ← 历史
                 </button>
-                {returnable && (
-                  <button
-                    onClick={returnToAnswer}
-                    className="inline-flex items-center gap-1 font-mono text-[10px] text-primary hover:underline"
-                  >
-                    <ArrowUp size={12} /> 返回回答
-                  </button>
-                )}
               </div>
               {answering && (
                 <span className="font-mono text-[10px] text-primary animate-pulse">思考中...</span>
@@ -133,13 +105,9 @@ export function TutorPanel({
                       {isUser ? "你" : "导师"}
                     </span>
                     <div className={isUser
-                      ? "min-w-0 max-w-[92%] break-words rounded-lg rounded-tr-none border border-primary/30 bg-primary/10 px-3 py-2 text-foreground"
+                      ? "min-w-0 max-w-[75%] break-words rounded-lg rounded-tr-none border border-primary/25 bg-primary/10 px-3 py-1.5 text-foreground"
                       : "min-w-0 max-w-full break-words text-muted-foreground"}>
-                      <MarkdownContent
-                        content={message.content}
-                        citations={citationMap}
-                        onCitationClick={handleCitationClick}
-                      />
+                      <MarkdownContent content={message.content} />
                     </div>
                   </div>
                 );
@@ -255,26 +223,6 @@ export function TutorPanel({
       </div>
     </aside>
   );
-}
-
-function buildCitationMap(sections: Section[]): Record<string, CitationChipData> {
-  const map: Record<string, CitationChipData> = {};
-  [...sections]
-    .sort((a, b) => a.order - b.order)
-    .forEach((section, index) => {
-      const label = `§${index + 1}`;
-      map[label] = {
-        sectionId: section.id,
-        label,
-        title: section.title,
-        excerpt: truncate(section.content.replace(/\s+/g, " ").trim(), 120),
-      };
-    });
-  return map;
-}
-
-function truncate(text: string, max: number) {
-  return text.length <= max ? text : `${text.slice(0, max)}…`;
 }
 
 function quickQuestionsFor(anchored: boolean) {
