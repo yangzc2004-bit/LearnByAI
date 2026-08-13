@@ -17,6 +17,10 @@ interface MarkdownContentProps {
   content: string;
   onTextSelect?: (selectedText: string) => void;
   onParagraphDoubleClick?: (text: string) => void;
+  /** "chat" skips the textbook format-repair pipeline (figure placeholders,
+   *  bare-LaTeX wrapping) that is tuned for generated chapter content and can
+   *  mangle tutor answers. */
+  variant?: "textbook" | "chat";
 }
 
 function getCodeText(node: ReactNode): string {
@@ -198,6 +202,7 @@ export function MarkdownContent({
   content,
   onTextSelect,
   onParagraphDoubleClick,
+  variant = "textbook",
 }: MarkdownContentProps) {
   const handleMouseUp = () => {
     const selection = window.getSelection();
@@ -355,7 +360,7 @@ export function MarkdownContent({
           hr: () => <hr className="my-6 border-border" />,
         }}
       >
-        {prepareMarkdownForRender(content)}
+        {variant === "chat" ? content : prepareMarkdownForRender(content)}
       </ReactMarkdown>
     </div>
   );

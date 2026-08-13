@@ -68,12 +68,25 @@ export function useTutor(course: Course | undefined, chapterId: string) {
   }, []);
 
   // Attach a newly selected passage to the CURRENT thread (keeping its history)
-  // instead of discarding it for a brand-new conversation.
+  // instead of discarding it for a brand-new conversation. The passage is
+  // appended as a quoted message at the BOTTOM of the thread so the flow reads
+  // naturally; the header banner keeps showing the thread's original anchor.
   const continueAnchored = useCallback((selectedText: string, sectionId?: string) => {
-    setActive((current) => current
-      ? { ...cloneAnnotation(current), selectedText, sectionId, scope: "anchored" }
-      : current);
-    setTarget({ scope: "anchored", selectedText, sectionId });
+    setActive((current) => {
+      if (!current) return current;
+      return {
+        ...cloneAnnotation(current),
+        sectionId,
+        messages: [
+          ...current.messages,
+          {
+            id: randomId(),
+            role: "user" as const,
+            content: `> ${selectedText.replace(/\n+/g, "\n> ")}`,
+          },
+        ],
+      };
+    });
     setError("");
   }, []);
 

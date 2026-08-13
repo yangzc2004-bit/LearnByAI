@@ -107,7 +107,7 @@ export function TutorPanel({
                     <div className={isUser
                       ? "min-w-0 max-w-[75%] break-words rounded-lg rounded-tr-none border border-primary/25 bg-primary/10 px-3 py-1.5 text-foreground"
                       : "min-w-0 max-w-full break-words text-muted-foreground"}>
-                      <MarkdownContent content={message.content} />
+                      <MarkdownContent content={message.content} variant="chat" />
                     </div>
                   </div>
                 );
