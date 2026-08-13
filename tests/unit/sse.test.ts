@@ -85,7 +85,9 @@ test("tutor panel exposes an explicit send button and error feedback", () => {
   assert.match(src, /SendHorizontal/u);
   assert.match(src, /aria-label="发送问题"/u);
   assert.match(src, /void tutor\.ask\(question\)\.then/u);
-  assert.match(src, /if \(sent\) input\.value = ""/u);
+  assert.match(src, /if \(sent\) \{\s+input\.value = ""/u);
+  assert.match(src, /textarea[\s\S]*name="question"/u);
+  assert.match(src, /Shift\+Enter|shiftKey/u);
   assert.match(src, /text-destructive/u);
   // The composer is always available (free chat), with a chat-first placeholder.
   assert.match(src, /输入问题，直接和导师聊聊/u);

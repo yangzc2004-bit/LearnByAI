@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent } from "react";
+import { FormEvent, KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Bot, MessageSquareQuote, SendHorizontal, Trash2, User, X } from "lucide-react";
 import { MarkdownContent } from "@/components/MarkdownContent";
@@ -30,14 +30,30 @@ export function TutorPanel({
 
   const suggestions = quickQuestionsFor(Boolean(anchoredText));
 
+  function resizeComposer(textarea: HTMLTextAreaElement) {
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
+  }
+
   function submitQuestion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
-    const input = form.elements.namedItem("question") as HTMLInputElement;
+    const input = form.elements.namedItem("question") as HTMLTextAreaElement;
     const question = input.value;
     void tutor.ask(question).then((sent) => {
-      if (sent) input.value = "";
+      if (sent) {
+        input.value = "";
+        resizeComposer(input);
+      }
     }).catch(() => undefined);
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter sends; Shift+Enter keeps the default newline behavior.
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
   }
 
   function openThreadInContext(annotation: Annotation) {
@@ -199,15 +215,19 @@ export function TutorPanel({
             ))}
           </div>
         )}
-        <form onSubmit={submitQuestion} className="flex items-center gap-2">
+        <form onSubmit={submitQuestion} className="flex items-end gap-2">
           <div className="relative flex-1">
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 font-mono text-[12px] text-primary">{">"}</span>
-            <input
+            <span className="pointer-events-none absolute left-3 top-2.5 font-mono text-[12px] text-primary">{">"}</span>
+            <textarea
               name="question"
+              rows={1}
+              onInput={(event) => resizeComposer(event.currentTarget)}
+              onKeyDown={handleComposerKeyDown}
               placeholder={anchoredText ? "追问这段内容..." : "输入问题，直接和导师聊聊..."}
               autoComplete="off"
               disabled={answering}
-              className="w-full bg-background border border-border py-2 pl-7 pr-3 font-mono text-[12px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none disabled:opacity-50"
+              title="Enter 发送，Shift+Enter 换行"
+              className="max-h-40 w-full resize-none overflow-y-auto bg-background border border-border py-2 pl-7 pr-3 font-mono text-[12px] leading-relaxed text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none disabled:opacity-50"
             />
           </div>
           <button
