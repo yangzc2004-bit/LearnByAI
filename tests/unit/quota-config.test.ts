@@ -39,6 +39,9 @@ test("quota writes use the serialized success-only consumption helper", () => {
   assert.match(quotaConfigSource, /import\("\.\/adminSettings"\)/);
   assert.match(quotaSource, /readEffectiveQuotaLimit/);
   assert.match(quotaSource, /withQuotaLock/);
+  assert.match(quotaSource, /const prepared = await withQuotaLock/u);
+  assert.match(quotaSource, /const value = await operation\(prepared\.quota\)/u);
+  assert.match(quotaSource, /pendingQuotaReservations/u);
   for (const source of [courseRoute, exportRoute, annotationRoute, generationRunner]) {
     assert.match(source, /withQuotaConsumption/);
     assert.doesNotMatch(source, /assertQuota/);

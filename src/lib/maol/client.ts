@@ -7,7 +7,7 @@ import { createMockAnswer, createMockChapter, createMockCourse } from "../mock";
 import { buildAnnotationTutorPrompt } from "../prompts/annotationTutor";
 import { buildChapterRepairByAuthorPrompt, buildChapterChunkRepairByAuthorPrompt } from "../prompts/chapterRepairer";
 import { buildChapterReviewPrompt, buildChapterReviewJsonRepairPrompt } from "../prompts/chapterReviewer";
-import { buildChapterWriterPrompt, getChapterDepthGuide } from "../prompts/chapterWriter";
+import { getChapterDepthGuide } from "../prompts/chapterWriter";
 import { buildRevisePrompt } from "../prompts/revise";
 import {
   buildChapterContractCompactPrompt,
@@ -27,6 +27,7 @@ import { researchLatestCourseKnowledge } from "../webResearch";
 import { dispatchAgentText } from "./dispatcher";
 import { assertMockFallbackAllowed } from "./fallback";
 import { markdownToSections } from "./integrator";
+import { runChapterAuthorHarness } from "./chapterAuthorHarness";
 
 export type CourseInput = {
   topic: string;
@@ -1528,37 +1529,6 @@ function dispatchCoursePlannerStage(
     overrides,
     mock: () => "{}",
     onJobUpdate,
-  });
-}
-
-async function runChapterAuthorHarness(
-  course: Course,
-  chapter: Chapter,
-  options: {
-    jobId: string;
-    maxTokens: number;
-    overrides?: ModelOverrides;
-    onJobUpdate?: (job: GenerationJob) => Promise<void> | void;
-  },
-) {
-  const chapterIndex = course.chapters.findIndex((item) => item.id === chapter.id);
-  const prompt = buildChapterWriterPrompt(course, chapter, {
-    chapterIndex,
-    chapters: course.chapters,
-  });
-
-  return dispatchAgentText({
-    agent: "AUTHOR",
-    jobId: options.jobId,
-    prompt,
-    temperature: 0.45,
-    maxTokens: options.maxTokens,
-    protocol: "responses",
-    continueOnOutputLimit: true,
-    maxContinuationSegments: chapter.depthWeight === "core" ? 6 : 4,
-    overrides: options.overrides,
-    mock: () => createMockChapter(course.topic, chapter.title, course.goal),
-    onJobUpdate: options.onJobUpdate,
   });
 }
 

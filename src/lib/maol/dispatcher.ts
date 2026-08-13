@@ -19,6 +19,15 @@ export async function dispatchAgentText(input: {
   protocol?: AIProtocolPreference;
   continueOnOutputLimit?: boolean;
   maxContinuationSegments?: number;
+  continuationPrompt?: (input: {
+    originalPrompt: string;
+    accumulatedText: string;
+    segment: number;
+    responseId?: string;
+    providerStateUnavailable: boolean;
+  }) => string;
+  continuationUsePreviousResponseId?: boolean;
+  validateContinuation?: (text: string, accumulatedText: string) => void;
   overrides?: ModelOverrides;
   mock?: () => string;
   onChunk?: (chunk: string) => void;
@@ -57,6 +66,9 @@ export async function dispatchAgentText(input: {
       protocol: input.protocol,
       continueOnOutputLimit: input.continueOnOutputLimit,
       maxContinuationSegments: input.maxContinuationSegments,
+      continuationPrompt: input.continuationPrompt,
+      continuationUsePreviousResponseId: input.continuationUsePreviousResponseId,
+      validateContinuation: input.validateContinuation,
       overrides: input.overrides,
       onChunk: input.onChunk,
     });

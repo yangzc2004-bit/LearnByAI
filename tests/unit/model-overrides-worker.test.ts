@@ -127,14 +127,19 @@ test("structural chapter failures are escalated instead of chunk-repaired", () =
   assert.match(source, /withAuthorRewriteRequiredIssue/u);
 });
 
-test("chapter drafts reuse the contract-aware AUTHOR harness over Responses continuations", () => {
-  const source = readFileSync("src/lib/maol/client.ts", "utf8");
+test("chapter drafts reuse the contract-aware AUTHOR harness through the Responses adapter", () => {
+  const clientSource = readFileSync("src/lib/maol/client.ts", "utf8");
+  const harnessSource = readFileSync("src/lib/maol/chapterAuthorHarness.ts", "utf8");
 
-  assert.match(source, /runChapterAuthorHarness/u);
-  assert.match(source, /buildChapterWriterPrompt/u);
-  assert.match(source, /protocol:\s*"responses"/u);
-  assert.match(source, /continueOnOutputLimit:\s*true/u);
-  assert.match(source, /maxContinuationSegments/u);
+  assert.match(clientSource, /runChapterAuthorHarness/u);
+  assert.match(harnessSource, /buildChapterWriterPrompt/u);
+  assert.match(harnessSource, /Course Bible rule/u);
+  assert.match(harnessSource, /Chapter Contract item/u);
+  assert.match(harnessSource, /Harness ledger/u);
+  assert.match(harnessSource, /protocol:\s*"responses"/u);
+  assert.match(harnessSource, /continuationUsePreviousResponseId:\s*false/u);
+  assert.match(harnessSource, /continuationPrompt/u);
+  assert.match(harnessSource, /validateHarnessContinuation/u);
 });
 
 test("chunk repair output is validated before being accepted", () => {

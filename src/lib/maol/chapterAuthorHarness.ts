@@ -1,0 +1,283 @@
+import { expectedChapterHeading } from "../chapterHeadings";
+import { appendJobEvent } from "../jobs";
+import { ModelOverrides } from "../modelOverrides";
+import { buildChapterWriterPrompt } from "../prompts/chapterWriter";
+import { Chapter, Course, GenerationJob } from "../types";
+import { dispatchAgentText } from "./dispatcher";
+
+type HarnessStage = {
+  id: string;
+  label: string;
+  heading?: string;
+  kind: "body" | "closing";
+};
+
+export async function runChapterAuthorHarness(
+  course: Course,
+  chapter: Chapter,
+  options: {
+    jobId: string;
+    maxTokens: number;
+    overrides?: ModelOverrides;
+    onJobUpdate?: (job: GenerationJob) => Promise<void> | void;
+  },
+) {
+  const chapterIndex = course.chapters.findIndex((item) => item.id === chapter.id);
+  const masterContract = buildChapterWriterPrompt(course, chapter, {
+    chapterIndex,
+    chapters: course.chapters,
+  });
+  const stages = buildChapterHarnessStages(course, chapter, chapterIndex);
+  const completed: string[] = [];
+  const perStageTokens = stageTokenBudget(options.maxTokens, stages.length);
+
+  for (let index = 0; index < stages.length; index += 1) {
+    const stage = stages[index]!;
+    await reportHarnessStage(options, stage, index, stages.length);
+    const prompt = buildHarnessStagePrompt({
+      masterContract,
+      course,
+      chapter,
+      chapterIndex,
+      stages,
+      stage,
+      stageIndex: index,
+      completedText: completed.join("\n\n"),
+    });
+    const text = await dispatchAgentText({
+      agent: "AUTHOR",
+      jobId: options.jobId,
+      prompt,
+      temperature: 0.45,
+      maxTokens: stage.kind === "closing" ? Math.min(perStageTokens, 4_096) : perStageTokens,
+      protocol: "responses",
+      continueOnOutputLimit: true,
+      maxContinuationSegments: 2,
+      continuationUsePreviousResponseId: false,
+      continuationPrompt: ({ accumulatedText }) => buildHarnessStageContinuationPrompt(
+        prompt,
+        accumulatedText,
+      ),
+      validateContinuation: validateHarnessContinuation,
+      overrides: options.overrides,
+      mock: () => mockHarnessStage(course, chapter, stage, index),
+      onJobUpdate: options.onJobUpdate,
+    });
+    validateHarnessStageOutput(stage, text, index);
+    completed.push(text.trim());
+  }
+
+  const chapterText = completed.join("\n\n").trim();
+  validateCompletedHarnessChapter(course, chapter, stages, chapterText);
+  return chapterText;
+}
+
+export function buildChapterHarnessStages(
+  course: Course,
+  chapter: Chapter,
+  chapterIndex = course.chapters.findIndex((item) => item.id === chapter.id),
+): HarnessStage[] {
+  const outlineSections = course.contentMode === "textbook"
+    ? course.textbookMeta?.outline?.chapters?.[chapterIndex]?.sections ?? []
+    : [];
+  const fixedRole = course.contentMode === "textbook"
+    ? course.textbookMeta?.outline?.chapters?.[chapterIndex]?.fixedRole
+    : undefined;
+  const topics = fixedRole
+    ? []
+    : outlineSections.length > 0
+    ? outlineSections.map((section) => section.title)
+    : chapter.contract?.requiredTopics ?? [];
+  const chapterNumber = Math.max(1, chapterIndex + 1);
+  const bodyStages = topics.length > 0
+    ? topics.map((topic, index) => ({
+        id: `section-${index + 1}`,
+        label: topic,
+        heading: `${chapterNumber}.${index + 1} ${stripSectionNumber(topic)}`,
+        kind: "body" as const,
+      }))
+    : [{
+        id: "chapter-body",
+        label: chapter.purpose ?? chapter.description,
+        kind: "body" as const,
+      }];
+
+  return [
+    ...bodyStages,
+    {
+      id: "chapter-closing",
+      label: "本章小结、练习与拓展阅读",
+      kind: "closing" as const,
+    },
+  ];
+}
+
+function buildHarnessStagePrompt(input: {
+  masterContract: string;
+  course: Course;
+  chapter: Chapter;
+  chapterIndex: number;
+  stages: HarnessStage[];
+  stage: HarnessStage;
+  stageIndex: number;
+  completedText: string;
+}) {
+  const completedHeadings = input.stages
+    .slice(0, input.stageIndex)
+    .map((stage) => stage.heading ?? stage.label);
+  const pendingHeadings = input.stages
+    .slice(input.stageIndex + 1)
+    .map((stage) => stage.heading ?? stage.label);
+  const previousTail = input.completedText.slice(-8_000);
+  const firstStage = input.stageIndex === 0;
+  const requiredChapterHeading = expectedChapterHeading(input.course, input.chapter);
+
+  return `${input.masterContract}
+
+# LearnByAI Chapter Contract Harness
+
+The whole-chapter instructions above are the immutable master contract. This request is one controlled stage in a multi-output chapter harness. Only the output scope changes; every Course Bible rule, Chapter Contract item, confirmed outline item, terminology choice, notation rule, source constraint, and quality requirement remains binding.
+For this request only, the stage output contract below replaces the master's phrases "output the complete chapter" and "write all sections". It does not relax or replace any content, continuity, notation, terminology, evidence, formatting, or quality constraint.
+
+Harness ledger:
+- Chapter: ${input.chapterIndex + 1}/${input.course.chapters.length} ${input.chapter.title}
+- Stage: ${input.stageIndex + 1}/${input.stages.length} ${input.stage.label}
+- Completed stages: ${completedHeadings.join("；") || "none"}
+- Pending stages: ${pendingHeadings.join("；") || "none"}
+
+${previousTail ? `Authoritative tail of completed chapter content:
+<completed_tail>
+${previousTail}
+</completed_tail>` : "No chapter content has been written yet."}
+
+Stage output contract:
+${firstStage
+    ? `- The first line must be exactly: # ${requiredChapterHeading}
+- After a short natural opening bridge, write only the current body stage${input.stage.heading ? ` under heading "## ${input.stage.heading}"` : ""}.`
+    : input.stage.kind === "closing"
+      ? `- Output only these three closing blocks, in this exact order: "## 本章小结", "## 练习", "## 拓展阅读".
+- The summary must synthesize all completed stages and bridge to the next chapter according to the Chapter Contract.
+- Give 3 to 5 progressively difficult exercises including one open project, then 2 to 4 reliable extension directions or resources.`
+      : `- Output only the current body stage under heading "## ${input.stage.heading}".
+- Connect naturally from the completed tail without repeating earlier definitions, formulas, examples, headings, tables, or figures.`}
+- Do not write any pending stage or closing block early.
+- Do not output a preface, status report, JSON, or a whole-document code fence.
+- A complete fenced code block must start and end on separate lines.
+- Finish this stage at a clean Markdown boundary.`;
+}
+
+function buildHarnessStageContinuationPrompt(stagePrompt: string, accumulatedText: string) {
+  return `${stagePrompt}
+
+# Harness stage continuation
+
+The same master contract and stage ledger remain binding. The provider cut off this stage before it reached a clean boundary. Continue only the current stage from the authoritative partial output below. Do not claim that prior context is unavailable, do not restart the stage, and do not write later stages.
+
+<partial_stage>
+${accumulatedText.slice(-10_000)}
+</partial_stage>`;
+}
+
+function validateHarnessContinuation(text: string) {
+  if (isMissingContextRefusal(text)) {
+    throw new Error("AUTHOR Responses continuation lost the chapter harness context.");
+  }
+}
+
+function validateHarnessStageOutput(stage: HarnessStage, text: string, stageIndex: number) {
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error(`AUTHOR harness stage ${stage.id} returned empty content.`);
+  if (isMissingContextRefusal(trimmed)) {
+    throw new Error(`AUTHOR harness stage ${stage.id} refused because context was unavailable.`);
+  }
+  if (stageIndex > 0 && /^#\s+/mu.test(trimmed)) {
+    throw new Error(`AUTHOR harness stage ${stage.id} repeated the chapter heading.`);
+  }
+  if (stage.kind === "body") {
+    if (stage.heading && !trimmed.includes(`## ${stage.heading}`)) {
+      throw new Error(`AUTHOR harness stage ${stage.id} omitted heading "${stage.heading}".`);
+    }
+    if (/^##\s+(?:本章小结|练习|拓展阅读)\s*$/mu.test(trimmed)) {
+      throw new Error(`AUTHOR harness stage ${stage.id} wrote a closing block too early.`);
+    }
+  } else {
+    for (const heading of ["## 本章小结", "## 练习", "## 拓展阅读"]) {
+      if (!trimmed.includes(heading)) {
+        throw new Error(`AUTHOR harness closing stage omitted "${heading}".`);
+      }
+    }
+  }
+}
+
+function validateCompletedHarnessChapter(
+  course: Course,
+  chapter: Chapter,
+  stages: HarnessStage[],
+  content: string,
+) {
+  const expectedHeading = `# ${expectedChapterHeading(course, chapter)}`;
+  if (!content.startsWith(expectedHeading)) {
+    throw new Error(`AUTHOR harness output must start with "${expectedHeading}".`);
+  }
+  for (const stage of stages) {
+    if (stage.heading && !content.includes(`## ${stage.heading}`)) {
+      throw new Error(`AUTHOR harness output omitted section "${stage.heading}".`);
+    }
+  }
+  if (isMissingContextRefusal(content)) {
+    throw new Error("AUTHOR harness output contains a provider context-loss refusal.");
+  }
+}
+
+function stageTokenBudget(totalTokens: number, stageCount: number) {
+  const proportional = Math.ceil(totalTokens / Math.max(1, stageCount) * 1.35);
+  return Math.max(4_096, Math.min(8_192, proportional));
+}
+
+function stripSectionNumber(value: string) {
+  return value.replace(/^\s*\d+(?:\.\d+)+[\s、.．-]*/u, "").trim();
+}
+
+export function isMissingContextRefusal(value: string) {
+  const sample = value.trim().slice(0, 1_000);
+  return [
+    /I (?:do not|don't|cannot|can't) (?:have|access|see|retrieve).{0,100}(?:previous|prior|answer|response|context|content)/iu,
+    /(?:previous|prior) (?:answer|response|context|content).{0,100}(?:not available|unavailable|missing|not provided)/iu,
+    /(?:无法|不能|没法).{0,50}(?:继续|续写).{0,100}(?:上文|前文|之前|先前|内容|回答|上下文)/u,
+    /(?:没有|未提供|无法访问|看不到).{0,60}(?:上文|前文|之前的回答|先前的回答|上下文)/u,
+  ].some((pattern) => pattern.test(sample));
+}
+
+async function reportHarnessStage(
+  options: {
+    jobId: string;
+    onJobUpdate?: (job: GenerationJob) => Promise<void> | void;
+  },
+  stage: HarnessStage,
+  stageIndex: number,
+  stageCount: number,
+) {
+  const job = appendJobEvent(options.jobId, {
+    agent: "AUTHOR",
+    status: "running",
+    message: `Chapter contract harness stage ${stageIndex + 1}/${stageCount}: ${stage.label}`,
+  }, { preserveJobStatus: true });
+  if (job) await options.onJobUpdate?.(job);
+}
+
+function mockHarnessStage(
+  course: Course,
+  chapter: Chapter,
+  stage: HarnessStage,
+  stageIndex: number,
+) {
+  if (stageIndex === 0) {
+    const heading = `# ${expectedChapterHeading(course, chapter)}`;
+    const section = stage.heading ? `\n\n## ${stage.heading}` : "";
+    return `${heading}${section}\n\n围绕${stage.label}展开教材说明。`;
+  }
+  if (stage.kind === "closing") {
+    return "## 本章小结\n\n本章完成核心内容梳理。\n\n## 练习\n\n1. 回顾本章核心概念。\n\n## 拓展阅读\n\n1. 阅读相关基础资料。";
+  }
+  return `## ${stage.heading}\n\n围绕${stage.label}展开说明。`;
+}

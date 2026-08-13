@@ -10,7 +10,9 @@ export function preRepairMarkdown(content: string) {
         wrapBareMathParagraphs(
           repairMarkdownFences(
             normalizeMath(
-              normalizeTextbookCallouts(repairedImageSyntax),
+              normalizeTextbookCallouts(
+                normalizeInlineFenceBoundaries(repairedImageSyntax),
+              ),
             ),
           ),
         ),
@@ -26,6 +28,60 @@ export function preRepairMarkdown(content: string) {
     // result is stable under a second pass (the renderer runs this again).
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/**
+ * Some OpenAI-compatible providers return a complete fenced block on the same
+ * physical line as surrounding prose. CommonMark only recognizes a fence at a
+ * block boundary, so turn those delimiters into real lines before the normal
+ * fence and math repair passes run.
+ */
+function normalizeInlineFenceBoundaries(content: string) {
+  const output: string[] = [];
+  let cursor = 0;
+  let inFence = false;
+
+  while (cursor < content.length) {
+    const marker = content.indexOf("```", cursor);
+    if (marker < 0) {
+      output.push(content.slice(cursor));
+      break;
+    }
+
+    output.push(content.slice(cursor, marker));
+    if (!inFence) {
+      const suffix = content.slice(marker + 3);
+      const language = suffix.match(/^([A-Za-z0-9_+-]{1,24})(?=\s)/u)?.[1] ?? "";
+      trimTrailingHorizontalWhitespace(output);
+      ensureTrailingNewline(output, 2);
+      output.push(`\`\`\`${language}\n`);
+      cursor = marker + 3 + language.length;
+      while (content[cursor] === " " || content[cursor] === "\t") cursor += 1;
+      inFence = true;
+      continue;
+    }
+
+    trimTrailingHorizontalWhitespace(output);
+    ensureTrailingNewline(output, 1);
+    output.push("```\n\n");
+    cursor = marker + 3;
+    while (content[cursor] === " " || content[cursor] === "\t") cursor += 1;
+    inFence = false;
+  }
+
+  return output.join("").replace(/\n{4,}/gu, "\n\n\n");
+}
+
+function trimTrailingHorizontalWhitespace(chunks: string[]) {
+  const last = chunks.length - 1;
+  if (last < 0) return;
+  chunks[last] = chunks[last]!.replace(/[ \t]+$/u, "");
+}
+
+function ensureTrailingNewline(chunks: string[], count: number) {
+  const joinedTail = chunks.at(-1) ?? "";
+  const existing = joinedTail.match(/\n*$/u)?.[0].length ?? 0;
+  if (existing < count) chunks.push("\n".repeat(count - existing));
 }
 
 /**

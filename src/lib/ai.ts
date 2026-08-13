@@ -31,6 +31,15 @@ type GenerateTextOptions = {
   protocol?: AIProtocolPreference;
   continueOnOutputLimit?: boolean;
   maxContinuationSegments?: number;
+  continuationPrompt?: (input: {
+    originalPrompt: string;
+    accumulatedText: string;
+    segment: number;
+    responseId?: string;
+    providerStateUnavailable: boolean;
+  }) => string;
+  continuationUsePreviousResponseId?: boolean;
+  validateContinuation?: (text: string, accumulatedText: string) => void;
   overrides?: ModelOverrides;
   onChunk?: (chunk: string) => void;
 };
@@ -112,6 +121,18 @@ async function generateTextWithContinuation(
       const text = protocol === "responses"
         ? await generateResponsesText(currentPrompt, options, config, previousResponseId)
         : await generateChatCompletionsText(currentPrompt, options, config);
+      if (accumulated && options?.validateContinuation) {
+        try {
+          options.validateContinuation(text, accumulated);
+        } catch (error) {
+          if (protocol === "responses") {
+            throw new ResponsesContinuationUnsupportedError(
+              safeErrorMessage(error, `${config.model} returned an invalid Responses continuation`),
+            );
+          }
+          throw error;
+        }
+      }
       return appendContinuation(accumulated, text);
     } catch (error) {
       if (!(error instanceof OutputLimitError) || !options?.continueOnOutputLimit) throw error;
@@ -126,8 +147,10 @@ async function generateTextWithContinuation(
       }
 
       accumulated = next;
-      previousResponseId = protocol === "responses" ? error.responseId : undefined;
-      if (protocol === "responses" && !previousResponseId) {
+      previousResponseId = protocol === "responses" && options?.continuationUsePreviousResponseId !== false
+        ? error.responseId
+        : undefined;
+      if (protocol === "responses" && !previousResponseId && !options?.continuationPrompt) {
         throw new ResponsesContinuationUnsupportedError(
           `${config.model} returned an incomplete Responses API result without a response id`,
         );
@@ -141,9 +164,17 @@ async function generateTextWithContinuation(
         );
       }
 
-      currentPrompt = protocol === "responses"
-        ? responsesContinuationPrompt()
-        : chatContinuationPrompt(prompt, accumulated);
+      currentPrompt = options?.continuationPrompt
+        ? options.continuationPrompt({
+            originalPrompt: prompt,
+            accumulatedText: accumulated,
+            segment: segment + 2,
+            responseId: previousResponseId,
+            providerStateUnavailable: !previousResponseId,
+          })
+        : protocol === "responses"
+          ? responsesContinuationPrompt()
+          : chatContinuationPrompt(prompt, accumulated);
       logContinuation(config, protocol, segment + 2, accumulated.length);
     }
   }

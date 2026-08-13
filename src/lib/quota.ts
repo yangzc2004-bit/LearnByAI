@@ -17,6 +17,7 @@ export type QuotaConsumptionResult<T> =
   | { ok: false; quota: Extract<QuotaResult, { ok: false }> };
 
 const quotaLocks = new Map<string, Promise<void>>();
+const pendingQuotaReservations = new Map<string, number>();
 
 export async function checkQuota(
   userId: string | undefined,
@@ -47,45 +48,68 @@ export async function withQuotaConsumption<T>(
   operation: (quota: Extract<QuotaResult, { ok: true }>) => Promise<T>,
 ): Promise<QuotaConsumptionResult<T>> {
   const actor = userId ?? "local-beta-user";
-
-  return withQuotaLock(actor, action, async () => {
+  const lockKey = quotaLockKey(actor, action);
+  const prepared = await withQuotaLock(actor, action, async () => {
     const quota = await checkQuota(actor, action);
     if (!quota.ok) {
-      return { ok: false, quota };
+      return { ok: false as const, quota };
+    }
+
+    const pending = pendingQuotaReservations.get(lockKey) ?? 0;
+    if (quota.remaining <= pending) {
+      return {
+        ok: false as const,
+        quota: exhaustedQuota(actor, action, quota.limit),
+      };
     }
 
     const event = createUsageEvent(actor, action);
     const reservation = await reserveServerUsageQuota(event, quota.limit, sinceIso());
     if (!reservation.ok) {
       return {
-        ok: false,
+        ok: false as const,
         quota: exhaustedQuota(actor, action, quota.limit),
       };
     }
 
-    try {
-      const reservedQuota = reservation.usedCount === undefined
-        ? quota
-        : {
-            ...quota,
-            remaining: Math.max(1, quota.limit - (reservation.usedCount - 1)),
-          };
-      const value = await operation(reservedQuota);
-      const usageEvent = await commitServerUsageQuotaReservation(event);
-      const consumed = quotaAfterConsumption(reservedQuota);
-      return {
-        ok: true,
-        quota: {
-          ...consumed,
-          actor: usageEvent.userId ?? consumed.actor,
-        },
-        value,
-      };
-    } catch (error) {
-      await releaseServerUsageQuotaReservation(event).catch(() => undefined);
-      throw error;
-    }
+    pendingQuotaReservations.set(lockKey, pending + 1);
+    const reservedQuota = reservation.usedCount === undefined
+      ? {
+          ...quota,
+          remaining: Math.max(1, quota.remaining - pending),
+        }
+      : {
+          ...quota,
+          remaining: Math.max(1, quota.limit - (reservation.usedCount - 1)),
+        };
+
+    return {
+      ok: true as const,
+      event,
+      quota: reservedQuota,
+    };
   });
+
+  if (!prepared.ok) return prepared;
+
+  try {
+    const value = await operation(prepared.quota);
+    const usageEvent = await commitServerUsageQuotaReservation(prepared.event);
+    const consumed = quotaAfterConsumption(prepared.quota);
+    return {
+      ok: true,
+      quota: {
+        ...consumed,
+        actor: usageEvent.userId ?? consumed.actor,
+      },
+      value,
+    };
+  } catch (error) {
+    await releaseServerUsageQuotaReservation(prepared.event).catch(() => undefined);
+    throw error;
+  } finally {
+    decrementPendingQuotaReservation(lockKey);
+  }
 }
 
 export async function consumeQuota(
@@ -138,7 +162,7 @@ async function withQuotaLock<T>(
   action: UsageEvent["action"],
   operation: () => Promise<T>,
 ) {
-  const lockKey = `${actor}:${action}`;
+  const lockKey = quotaLockKey(actor, action);
   const previous = quotaLocks.get(lockKey) ?? Promise.resolve();
   let release!: () => void;
   const current = new Promise<void>((resolve) => {
@@ -156,4 +180,17 @@ async function withQuotaLock<T>(
       quotaLocks.delete(lockKey);
     }
   }
+}
+
+function quotaLockKey(actor: string, action: UsageEvent["action"]) {
+  return `${actor}:${action}`;
+}
+
+function decrementPendingQuotaReservation(lockKey: string) {
+  const pending = pendingQuotaReservations.get(lockKey) ?? 0;
+  if (pending <= 1) {
+    pendingQuotaReservations.delete(lockKey);
+    return;
+  }
+  pendingQuotaReservations.set(lockKey, pending - 1);
 }
