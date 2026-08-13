@@ -133,6 +133,16 @@ test("failed-figure marker roundtrips caption/prompt for retry", () => {
   assert.equal(placeholder?.prompt, "draw the GPI loop");
 });
 
+test("failed-figure marker supports an indented Markdown block", () => {
+  const marker = [
+    "   > 图示暂未生成（模型生图）：空间斑块与扩散。provider timeout",
+    '   <!--learnbyai-figure-failed {"caption":"空间斑块与扩散","prompt":"draw a landscape"}-->',
+  ].join("\n");
+  const match = createFailedFigureMarkdownRe().exec(`前文。\n\n${marker}\n\n后文。`);
+  assert.ok(match, "indented marker should match");
+  assert.equal(parseFailedFigureMarker(match![1] ?? "")?.caption, "空间斑块与扩散");
+});
+
 // ---- markdown → TeX ---------------------------------------------------------
 
 test("markdownToTex drops the duplicate 第 N 章 heading", async () => {

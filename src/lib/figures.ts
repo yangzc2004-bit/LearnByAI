@@ -451,7 +451,7 @@ function buildFigureFailureNote(placeholder: FigurePlaceholder, mode: ImageGener
 
 /** Matches the failure marker pair (note + hidden payload comment). */
 export function createFailedFigureMarkdownRe() {
-  return /> 图示暂未生成[^\n]*\n<!--learnbyai-figure-failed (\{[^\n]*\})-->/gu;
+  return /^[ \t]*> 图示暂未生成[^\n]*\n[ \t]*<!--learnbyai-figure-failed (\{[^\n]*\})-->/gmu;
 }
 
 export function parseFailedFigureMarker(payload: string): FigurePlaceholder | undefined {
