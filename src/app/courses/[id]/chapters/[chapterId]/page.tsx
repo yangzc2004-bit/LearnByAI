@@ -46,6 +46,17 @@ function getChapterBody(chapter: Chapter) {
   return chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
 }
 
+/**
+ * The chapter writer emits an opening preamble (chapter title + introduction
+ * paragraphs) before the first "## N.M" section. markdownToSections keeps that
+ * preamble as sections[0] titled with the chapter title, but it is not a real
+ * numbered section — the reader's TOC must skip it so the first real section
+ * stays "N.1" and does not shift to "N.2".
+ */
+function isSectionPreamble(section: Section) {
+  return section.order === 0 && !/^##\s/mu.test(section.content ?? "");
+}
+
 function isWaitingForBackgroundGeneration(chapter: Chapter) {
   return Boolean(chapter.generationJobId);
 }
@@ -481,7 +492,7 @@ export default function ReaderPage() {
             {course.chapters.map((ch, idx) => {
               const isActive = ch.id === chapterId;
               const readable = isChapterReadable(ch);
-              const chapterSections = ch.sections ?? [];
+              const chapterSections = (ch.sections ?? []).filter((section) => !isSectionPreamble(section));
               const sectionsExpanded = expandedChapters[ch.id] ?? isActive;
               return (
                 <div key={ch.id}>
@@ -513,7 +524,7 @@ export default function ReaderPage() {
                     </button>
                     {sectionsExpanded && (
                       <div className="pb-2 pl-9 pr-3">
-                        {chapterSections.map((section) => (
+                        {chapterSections.map((section, sectionIndex) => (
                           <button
                             key={section.id}
                             type="button"
@@ -523,7 +534,7 @@ export default function ReaderPage() {
                             disabled={!readable && !isActive}
                             className="block w-full rounded px-2 py-1.5 text-left text-[11px] leading-snug text-muted-foreground hover:bg-muted/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                           >
-                            <span className="mr-1 font-mono">{idx + 1}.{section.order + 1}</span>
+                            <span className="mr-1 font-mono">{idx + 1}.{sectionIndex + 1}</span>
                             {section.title}
                           </button>
                         ))}
