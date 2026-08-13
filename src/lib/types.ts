@@ -239,6 +239,18 @@ export type AgentEvent = {
   createdAt: string;
 };
 
+export type ChapterHarnessCheckpoint = {
+  version: 1;
+  chapterId: string;
+  contractFingerprint: string;
+  stageIds: string[];
+  completedStages: Array<{
+    id: string;
+    content: string;
+  }>;
+  updatedAt: string;
+};
+
 export type GenerationJob = {
   id: string;
   userId?: string;
@@ -266,6 +278,7 @@ export type GenerationJob = {
     courseBibleCore?: Omit<CourseBible, "chapterContracts">;
     chapterContracts?: Record<string, ChapterContract>;
   };
+  chapterHarnessCheckpoint?: ChapterHarnessCheckpoint;
   /** Set when an admin cancels the job — distinguishes an intentional cancel from a real failure. */
   cancelledByAdmin?: boolean;
   /** Admin marked this failed job as handled; drops it from the attention badge/list. */

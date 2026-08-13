@@ -1,8 +1,9 @@
+import { createHash } from "node:crypto";
 import { expectedChapterHeading } from "../chapterHeadings";
-import { appendJobEvent } from "../jobs";
+import { appendJobEvent, getGenerationJob, patchGenerationJob } from "../jobs";
 import { ModelOverrides } from "../modelOverrides";
 import { buildChapterWriterPrompt } from "../prompts/chapterWriter";
-import { Chapter, Course, GenerationJob } from "../types";
+import { Chapter, ChapterHarnessCheckpoint, Course, GenerationJob } from "../types";
 import { dispatchAgentText } from "./dispatcher";
 
 type HarnessStage = {
@@ -28,10 +29,21 @@ export async function runChapterAuthorHarness(
     chapters: course.chapters,
   });
   const stages = buildChapterHarnessStages(course, chapter, chapterIndex);
-  const completed: string[] = [];
+  const contractFingerprint = buildHarnessContractFingerprint(masterContract, chapter.id, stages);
+  const checkpoint = readValidHarnessCheckpoint(
+    getGenerationJob(options.jobId)?.chapterHarnessCheckpoint,
+    chapter.id,
+    contractFingerprint,
+    stages,
+  );
+  const completed = checkpoint?.completedStages.map((stage) => stage.content) ?? [];
   const perStageTokens = stageTokenBudget(options.maxTokens, stages.length);
 
-  for (let index = 0; index < stages.length; index += 1) {
+  if (completed.length > 0) {
+    await reportHarnessResume(options, completed.length, stages.length);
+  }
+
+  for (let index = completed.length; index < stages.length; index += 1) {
     const stage = stages[index]!;
     await reportHarnessStage(options, stage, index, stages.length);
     const prompt = buildHarnessStagePrompt({
@@ -65,6 +77,17 @@ export async function runChapterAuthorHarness(
     });
     validateHarnessStageOutput(stage, text, index);
     completed.push(text.trim());
+    await saveHarnessCheckpoint(options, {
+      version: 1,
+      chapterId: chapter.id,
+      contractFingerprint,
+      stageIds: stages.map((item) => item.id),
+      completedStages: stages.slice(0, completed.length).map((item, completedIndex) => ({
+        id: item.id,
+        content: completed[completedIndex]!,
+      })),
+      updatedAt: new Date().toISOString(),
+    });
   }
 
   const chapterText = completed.join("\n\n").trim();
@@ -128,7 +151,6 @@ function buildHarnessStagePrompt(input: {
   const pendingHeadings = input.stages
     .slice(input.stageIndex + 1)
     .map((stage) => stage.heading ?? stage.label);
-  const previousTail = input.completedText.slice(-8_000);
   const firstStage = input.stageIndex === 0;
   const requiredChapterHeading = expectedChapterHeading(input.course, input.chapter);
 
@@ -145,10 +167,10 @@ Harness ledger:
 - Completed stages: ${completedHeadings.join("；") || "none"}
 - Pending stages: ${pendingHeadings.join("；") || "none"}
 
-${previousTail ? `Authoritative tail of completed chapter content:
-<completed_tail>
-${previousTail}
-</completed_tail>` : "No chapter content has been written yet."}
+${input.completedText ? `Authoritative validated chapter content completed by this harness:
+<completed_chapter>
+${input.completedText}
+</completed_chapter>` : "No chapter content has been written yet."}
 
 Stage output contract:
 ${firstStage
@@ -174,7 +196,7 @@ function buildHarnessStageContinuationPrompt(stagePrompt: string, accumulatedTex
 The same master contract and stage ledger remain binding. The provider cut off this stage before it reached a clean boundary. Continue only the current stage from the authoritative partial output below. Do not claim that prior context is unavailable, do not restart the stage, and do not write later stages.
 
 <partial_stage>
-${accumulatedText.slice(-10_000)}
+${accumulatedText}
 </partial_stage>`;
 }
 
@@ -263,6 +285,81 @@ async function reportHarnessStage(
     message: `Chapter contract harness stage ${stageIndex + 1}/${stageCount}: ${stage.label}`,
   }, { preserveJobStatus: true });
   if (job) await options.onJobUpdate?.(job);
+}
+
+async function reportHarnessResume(
+  options: {
+    jobId: string;
+    onJobUpdate?: (job: GenerationJob) => Promise<void> | void;
+  },
+  completedStageCount: number,
+  stageCount: number,
+) {
+  const job = appendJobEvent(options.jobId, {
+    agent: "AUTHOR",
+    status: "running",
+    message: `Chapter contract harness restored ${completedStageCount}/${stageCount} validated stages; resuming at stage ${completedStageCount + 1}.`,
+  }, { preserveJobStatus: true });
+  if (job) await options.onJobUpdate?.(job);
+}
+
+async function saveHarnessCheckpoint(
+  options: {
+    jobId: string;
+    onJobUpdate?: (job: GenerationJob) => Promise<void> | void;
+  },
+  checkpoint: ChapterHarnessCheckpoint,
+) {
+  const job = patchGenerationJob(options.jobId, {
+    chapterHarnessCheckpoint: checkpoint,
+  });
+  if (job) await options.onJobUpdate?.(job);
+}
+
+export function buildHarnessContractFingerprint(
+  masterContract: string,
+  chapterId: string,
+  stages: HarnessStage[],
+) {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      version: 1,
+      chapterId,
+      masterContract,
+      stages: stages.map(({ id, label, heading, kind }) => ({ id, label, heading, kind })),
+    }))
+    .digest("hex");
+}
+
+export function readValidHarnessCheckpoint(
+  checkpoint: ChapterHarnessCheckpoint | undefined,
+  chapterId: string,
+  contractFingerprint: string,
+  stages: HarnessStage[],
+) {
+  if (!checkpoint || checkpoint.version !== 1) return undefined;
+  if (checkpoint.chapterId !== chapterId || checkpoint.contractFingerprint !== contractFingerprint) {
+    return undefined;
+  }
+  const stageIds = stages.map((stage) => stage.id);
+  if (
+    checkpoint.stageIds.length !== stageIds.length
+    || checkpoint.stageIds.some((id, index) => id !== stageIds[index])
+    || checkpoint.completedStages.length > stages.length
+  ) {
+    return undefined;
+  }
+  for (let index = 0; index < checkpoint.completedStages.length; index += 1) {
+    const completed = checkpoint.completedStages[index];
+    const stage = stages[index];
+    if (!completed || !stage || completed.id !== stage.id) return undefined;
+    try {
+      validateHarnessStageOutput(stage, completed.content, index);
+    } catch {
+      return undefined;
+    }
+  }
+  return checkpoint;
 }
 
 function mockHarnessStage(

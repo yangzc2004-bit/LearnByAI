@@ -2,7 +2,7 @@ import { generateText } from "../ai";
 import { AIProtocolPreference } from "../aiProtocol";
 import { appendJobEvent } from "../jobs";
 import { ModelOverrides } from "../modelOverrides";
-import { safeErrorMessage } from "../safeError";
+import { redactSecrets, safeErrorMessage } from "../safeError";
 import { AgentName, GenerationJob } from "../types";
 import { canCallAgent, resolveAgent } from "./registry";
 
@@ -87,11 +87,36 @@ export async function dispatchAgentText(input: {
       await appendAndPersist(input.jobId, {
         agent: input.agent,
         status: "failed",
-        message: safeErrorMessage(error, `${input.agent} failed.`),
+        message: `${input.agent} failed (${classifyAgentFailure(error)}).`,
       }, input.onJobUpdate);
     }
     throw error;
   }
+}
+
+export function classifyAgentFailure(error: unknown) {
+  const message = redactSecrets(error).toLowerCase();
+  if (message.includes("no visible progress") || message.includes("output limit")) {
+    return "provider_output_limit";
+  }
+  if (message.includes("timed out") || message.includes("timeout") || message.includes("abort")) {
+    return "provider_timeout";
+  }
+  if (message.includes("429") || message.includes("rate limit")) {
+    return "provider_rate_limit";
+  }
+  if (/\b(?:500|502|503|504|522)\b/u.test(message) || message.includes("unavailable")) {
+    return "provider_unavailable";
+  }
+  if (message.includes("harness") || message.includes("contract")) {
+    return "harness_validation";
+  }
+  if (message.includes("responses api")) {
+    return "responses_transport";
+  }
+  return safeErrorMessage(error, "provider_error") === "provider_error"
+    ? "provider_error"
+    : "provider_rejected";
 }
 
 async function appendAndPersist(

@@ -25,6 +25,17 @@ test("public generation jobs do not expose model override secrets", () => {
       researchBrief: "private research brief",
       skeleton: { profile: "private" },
     },
+    chapterHarnessCheckpoint: {
+      version: 1,
+      chapterId: crypto.randomUUID(),
+      contractFingerprint: "private-contract-fingerprint",
+      stageIds: ["section-1"],
+      completedStages: [{
+        id: "section-1",
+        content: "private validated chapter content",
+      }],
+      updatedAt: new Date().toISOString(),
+    },
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   } as const;
@@ -33,8 +44,10 @@ test("public generation jobs do not expose model override secrets", () => {
 
   assert.equal(publicJob.modelOverrides, undefined);
   assert.equal(publicJob.planningCheckpoint, undefined);
+  assert.equal(publicJob.chapterHarnessCheckpoint, undefined);
   assert.doesNotMatch(JSON.stringify(publicJob), /sk-secret/u);
   assert.doesNotMatch(JSON.stringify(publicJob), /private research brief/u);
+  assert.doesNotMatch(JSON.stringify(publicJob), /private validated chapter content/u);
 });
 
 test("worker request source includes saved model overrides", () => {

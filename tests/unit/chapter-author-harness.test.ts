@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildHarnessContractFingerprint,
   buildChapterHarnessStages,
   isMissingContextRefusal,
+  readValidHarnessCheckpoint,
 } from "../../src/lib/maol/chapterAuthorHarness";
-import { Chapter, Course } from "../../src/lib/types";
+import { Chapter, ChapterHarnessCheckpoint, Course } from "../../src/lib/types";
 
 function fixture() {
   const chapter: Chapter = {
@@ -112,5 +114,54 @@ test("chapter author harness rejects provider context-loss refusals", () => {
       "This section continues the population dynamics derivation from the completed stage.",
     ),
     false,
+  );
+});
+
+test("chapter author harness restores only validated stages bound to the same contract", () => {
+  const { course, chapter } = fixture();
+  const stages = buildChapterHarnessStages(course, chapter, 0);
+  const masterContract = "immutable course bible and chapter contract";
+  const fingerprint = buildHarnessContractFingerprint(masterContract, chapter.id, stages);
+  const checkpoint: ChapterHarnessCheckpoint = {
+    version: 1,
+    chapterId: chapter.id,
+    contractFingerprint: fingerprint,
+    stageIds: stages.map((stage) => stage.id),
+    completedStages: [{
+      id: stages[0]!.id,
+      content: `# chapter\n\n## ${stages[0]!.heading}\n\nValidated first-stage content.`,
+    }],
+    updatedAt: new Date(0).toISOString(),
+  };
+
+  assert.equal(
+    readValidHarnessCheckpoint(checkpoint, chapter.id, fingerprint, stages)?.completedStages.length,
+    1,
+  );
+  assert.equal(
+    readValidHarnessCheckpoint(checkpoint, chapter.id, `${fingerprint}-changed`, stages),
+    undefined,
+  );
+});
+
+test("chapter author harness rejects checkpoints whose completed stage is not valid", () => {
+  const { course, chapter } = fixture();
+  const stages = buildChapterHarnessStages(course, chapter, 0);
+  const fingerprint = buildHarnessContractFingerprint("contract", chapter.id, stages);
+  const checkpoint: ChapterHarnessCheckpoint = {
+    version: 1,
+    chapterId: chapter.id,
+    contractFingerprint: fingerprint,
+    stageIds: stages.map((stage) => stage.id),
+    completedStages: [{
+      id: stages[0]!.id,
+      content: "I don't have the previous answer content, so I can't continue it.",
+    }],
+    updatedAt: new Date(0).toISOString(),
+  };
+
+  assert.equal(
+    readValidHarnessCheckpoint(checkpoint, chapter.id, fingerprint, stages),
+    undefined,
   );
 });
