@@ -1093,6 +1093,7 @@ export async function refreshServerGenerationJobLease(
 
     const refreshed: GenerationJob = {
       ...(data.payload as GenerationJob),
+      ...(localGenerationJobs.get(jobId) ?? {}),
       lockedBy: workerId,
       lockedUntil,
       updatedAt: now,
@@ -1105,7 +1106,6 @@ export async function refreshServerGenerationJobLease(
         .from("generation_jobs")
         .update({
           locked_until: lockedUntil,
-          payload: refreshed,
           updated_at: now,
         })
         .eq("id", jobId)

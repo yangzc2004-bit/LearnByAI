@@ -18,3 +18,12 @@ test("course persistence retries transient Supabase gateway failures", () => {
   assert.match(source, /invalid response\|upstream\|bad gateway/u);
   assert.match(source, /"Persist chapter",\s*\(\) => supabase\.from\("chapters"\)\.upsert/u);
 });
+
+test("lease refresh never overwrites a newer harness checkpoint with a stale payload", () => {
+  const refreshBlock = source.slice(
+    source.indexOf("export async function refreshServerGenerationJobLease"),
+    source.indexOf("export async function claimServerGenerationJob"),
+  );
+  assert.match(refreshBlock, /\.\.\.\(localGenerationJobs\.get\(jobId\) \?\? \{\}\)/u);
+  assert.doesNotMatch(refreshBlock, /\.update\(\{[\s\S]*payload:\s*refreshed/u);
+});
