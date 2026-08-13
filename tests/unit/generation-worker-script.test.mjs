@@ -98,6 +98,16 @@ test("generation worker script times out stuck worker requests", async () => {
   );
 });
 
+test("worker loop periodically recovers expired job locks", async () => {
+  const source = await import("node:fs/promises").then(({ readFile }) =>
+    readFile("scripts/run-generation-worker-loop.mjs", "utf8"),
+  );
+
+  assert.match(source, /GENERATION_WORKER_RECOVER_INTERVAL_MS/u);
+  assert.match(source, /setInterval\(\(\) => \{\s*void recoverInterruptedJobs/u);
+  assert.match(source, /recoveryInFlight/u);
+});
+
 function jsonResponse(value, options = {}) {
   return {
     ok: options.ok ?? true,

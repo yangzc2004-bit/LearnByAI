@@ -1521,7 +1521,7 @@ async function shouldRecoverExpiredGenerationJob(
   job: GenerationJob,
   supabase: NonNullable<ReturnType<typeof createSupabaseServiceClient>>,
 ) {
-  if (job.type !== "chapter") return true;
+  if (job.type !== "chapter" || job.mode === "review_draft") return true;
   return !(await hasPersistedChapterBody(job, supabase));
 }
 
@@ -1542,7 +1542,7 @@ async function hasPersistedChapterBody(
 }
 
 function shouldRecoverExpiredLocalGenerationJob(job: GenerationJob) {
-  if (job.type !== "chapter" || !job.chapterId) return true;
+  if (job.type !== "chapter" || job.mode === "review_draft" || !job.chapterId) return true;
   for (const course of localCourses.values()) {
     const chapter = course.chapters.find((item) => item.id === job.chapterId);
     if (chapter?.content || chapter?.sections?.length) return false;

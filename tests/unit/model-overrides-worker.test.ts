@@ -128,6 +128,7 @@ test("chapter generation saves readable draft before background review jobs", ()
   assert.match(serverStoreSource, /job\.mode !== "review_draft"/u);
   assert.match(serverStoreSource, /GENERATION_HEARTBEAT_STALE_MS/u);
   assert.match(serverStoreSource, /shouldRecoverStaleLockedRow/u);
+  assert.match(serverStoreSource, /job\.mode === "review_draft"/u);
 });
 
 test("structural chapter failures are escalated instead of chunk-repaired", () => {
