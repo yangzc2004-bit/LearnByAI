@@ -50,6 +50,14 @@ test("TQH self-repair can recover deterministic format failures", () => {
   assert.ok(result.report.issues.some((issue) => issue.check === "self_repair.attempts"));
 });
 
+test("TQH does not replace a chapter with a worse deterministic repair", () => {
+  const content = ["# Heading", "概念解释", "练习 task", "$ orphan"].join("\n");
+  const result = runChapterQualityPipelineWithRepair(chapter(), content, (value) => `${value}\n\`\`\`js`);
+
+  assert.equal(result.content, content);
+  assert.equal(result.report.status, "failed");
+});
+
 test("format repair normalizes isolated dollar math blocks", () => {
   const content = ["# Heading", "概念解释", "练习 task", "$", "a = b", "$"].join("\n");
   const repaired = preRepairMarkdown(content);

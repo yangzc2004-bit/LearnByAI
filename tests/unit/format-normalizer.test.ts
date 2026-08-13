@@ -16,6 +16,22 @@ test("preserves CJK-adjacent inline math", () => {
   assert.equal(postRepairMarkdown(input), input);
 });
 
+test("wraps bare command-led math embedded in Chinese prose", () => {
+  const input = String.raw`逐元素解读：\alpha_{11} = -0.1 表示浮游植物对自身有密度制约；\alpha_{12} = -0.3 表示浮游动物对浮游植物不利。`;
+  const out = postRepairMarkdown(input);
+  assert.match(out, /\$\\alpha_\{11\} = -0\.1\$/u, out);
+  assert.match(out, /\$\\alpha_\{12\} = -0\.3\$/u, out);
+  assert.ok(!validateFormat(out).some((issue) => issue.check === "format.bare_latex"), JSON.stringify(validateFormat(out)));
+  assert.equal(postRepairMarkdown(out), out, "must stay idempotent");
+});
+
+test("wraps a bare command-led expression next to Chinese punctuation", () => {
+  const input = String.raw`注意：\text{diag}(\mathbf{x}) 是以向量分量为对角元的矩阵。`;
+  const out = postRepairMarkdown(input);
+  assert.match(out, /\$\\text\{diag\}\(\\mathbf\{x\}\)\$/u, out);
+  assert.equal(postRepairMarkdown(out), out);
+});
+
 test("tightens spaced inline math so remark-math can render it", () => {
   // "$ x $" is NOT recognized by remark-math (space after opening / before closing)
   // and would leak as a literal "$". Must become "$x$".

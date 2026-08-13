@@ -9,9 +9,11 @@ export function preRepairMarkdown(content: string) {
       escapePipesInTableMath(
         wrapBareMathParagraphs(
           repairMarkdownFences(
-            normalizeMath(
-              normalizeTextbookCallouts(
-                normalizeInlineFenceBoundaries(repairedImageSyntax),
+            wrapBareInlineLatexFragments(
+              normalizeMath(
+                normalizeTextbookCallouts(
+                  normalizeInlineFenceBoundaries(repairedImageSyntax),
+                ),
               ),
             ),
           ),
@@ -132,6 +134,136 @@ function normalizeLegacyFigureCaption(alt: string) {
     .replace(/\s+/gu, " ")
     .trim()
     .slice(0, 80);
+}
+
+/**
+ * A long-form writer can leave a valid LaTeX expression naked inside an
+ * otherwise ordinary Chinese sentence:
+ *
+ *   逐元素解读：\alpha_{11} = -0.1 表示自限制；
+ *
+ * It is not a display formula and therefore cannot be fixed by the paragraph
+ * wrapper below. Extract only the command-led mathematical fragment, ask KaTeX
+ * whether it is valid, then give it explicit inline delimiters. The scanner
+ * deliberately stops at normal CJK prose, so it cannot accidentally wrap the
+ * rest of an explanation as math.
+ */
+function wrapBareInlineLatexFragments(content: string) {
+  return transformOutsideFences(content, (text) => {
+    const lines = text.split("\n");
+    let inDisplayMath = false;
+
+    return lines
+      .map((line) => {
+        if (line.trim() === "$$") {
+          inDisplayMath = !inDisplayMath;
+          return line;
+        }
+        return inDisplayMath ? line : wrapBareInlineLatexInLine(line);
+      })
+      .join("\n");
+  });
+}
+
+function wrapBareInlineLatexInLine(line: string) {
+  let output = "";
+  let index = 0;
+
+  while (index < line.length) {
+    const char = line[index]!;
+
+    // Preserve existing inline math verbatim. sanitizeMathDelimiters owns
+    // malformed dollar recovery later in the pipeline.
+    if (char === "$" && line[index - 1] !== "\\") {
+      const closing = findInlineMathClosingDollar(line, index + 1);
+      if (closing >= 0) {
+        output += line.slice(index, closing + 1);
+        index = closing + 1;
+        continue;
+      }
+    }
+
+    if (
+      char !== "\\" ||
+      line[index - 1] === "\\" ||
+      !hasBareInlineLatexStartBoundary(line, index) ||
+      !isStrongLatexCommandAt(line, index)
+    ) {
+      output += char;
+      index += 1;
+      continue;
+    }
+
+    const end = findBareInlineLatexEnd(line, index);
+    const candidate = line.slice(index, end).trim();
+    if (candidate && isLikelyBareInlineLatex(candidate) && canRenderMath(candidate, false)) {
+      output += `$${candidate}$`;
+      index = end;
+      continue;
+    }
+
+    output += char;
+    index += 1;
+  }
+
+  return output;
+}
+
+function findInlineMathClosingDollar(value: string, start: number) {
+  for (let index = start; index < value.length; index += 1) {
+    if (value[index] === "$" && value[index - 1] !== "\\") return index;
+  }
+  return -1;
+}
+
+function hasBareInlineLatexStartBoundary(value: string, index: number) {
+  const previous = value[index - 1];
+  return (
+    previous === undefined ||
+    /[\s“"'：:；;，,。！？!?、]/u.test(previous) ||
+    /[一-鿿]/u.test(previous)
+  );
+}
+
+function isStrongLatexCommandAt(value: string, index: number) {
+  const command = value.slice(index).match(
+    /^\\(?:alpha|beta|gamma|theta|lambda|sigma|mu|pi|rho|tau|phi|psi|omega|delta|epsilon|varepsilon|eta|kappa|xi|zeta|frac|dfrac|tfrac|sqrt|sum|prod|int|partial|nabla|mathbf|mathbb|mathcal|mathrm|operatorname|text|hat|bar|vec|dot|ddot|left|right|begin|end|quad|qquad|cdot|times|le|leq|ge|geq|ne|neq|approx|sim|pm|mp|infty|ldots|dots|det|log|ln|exp)(?![A-Za-z])/u,
+  );
+  return Boolean(command);
+}
+
+function isLikelyBareInlineLatex(value: string) {
+  return /^\\[A-Za-z]+/u.test(value) && !/[\n$]/u.test(value) && value.length <= 220;
+}
+
+function findBareInlineLatexEnd(value: string, start: number) {
+  let index = start;
+  let braceDepth = 0;
+
+  while (index < value.length && index - start < 220) {
+    const char = value[index]!;
+
+    if (char === "{") {
+      braceDepth += 1;
+      index += 1;
+      continue;
+    }
+    if (char === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      index += 1;
+      continue;
+    }
+    if (
+      /[A-Za-z0-9_\\^=<>+\-*/|()[\],.;:!?'"\s]/u.test(char) ||
+      (braceDepth > 0 && /[一-鿿]/u.test(char))
+    ) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+
+  return index;
 }
 
 /**

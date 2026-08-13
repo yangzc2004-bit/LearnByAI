@@ -484,7 +484,7 @@ async function reviewChapter(
 ) {
   // Always resolve format deterministically before scoring: format is a solved,
   // deterministic problem and must not depend on (or consume) the LLM repair loop.
-  const quality = runChapterQualityPipelineWithRepair(chapter, postRepairMarkdown(content), postRepairMarkdown);
+  const quality = runChapterQualityPipelineWithRepair(chapter, content, postRepairMarkdown);
   const report = quality.report;
   let lastReviewerText: string | undefined;
 

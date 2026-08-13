@@ -3,6 +3,7 @@ import { validateContinuity } from "./continuity";
 import { validateFactLite } from "./fact-lite";
 import { validateFormat } from "./format";
 import { validateStructure } from "./structure";
+import { shouldAcceptQualityCandidate } from "./candidate";
 
 const MAX_SELF_REPAIR_ATTEMPTS = 1;
 
@@ -46,8 +47,10 @@ export function runChapterQualityPipelineWithRepair(
     attempts += 1;
     const repaired = repair(nextContent);
     if (repaired === nextContent) break;
+    const repairedReport = runChapterQualityPipeline(chapter, repaired);
+    if (!shouldAcceptQualityCandidate(report, repairedReport)) break;
     nextContent = repaired;
-    report = runChapterQualityPipeline(chapter, nextContent);
+    report = repairedReport;
   }
 
   return {
