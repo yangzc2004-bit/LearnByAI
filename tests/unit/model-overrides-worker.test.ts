@@ -55,6 +55,7 @@ test("admin chapter actions inherit saved model overrides", () => {
   const source = readFileSync("src/lib/adminData.ts", "utf8");
 
   assert.match(source, /findAdminModelOverridesForChapter/u);
+  assert.match(source, /resolveModelOverrides\(userId,\s*savedOverrides\)/u);
   assert.match(source, /retryAdminJob[\s\S]*modelOverrides/u);
   assert.match(source, /enqueueAdminChapterReview[\s\S]*modelOverrides/u);
   assert.match(source, /enqueueAdminChapterGeneration[\s\S]*modelOverrides/u);

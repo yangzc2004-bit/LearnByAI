@@ -8,6 +8,7 @@ import { deleteServerCourseByAdmin, snapshotChapterBeforeRegen } from "./serverS
 import { normalizeCourse, normalizeLearningMode, normalizeStyles } from "./normalizeCourse";
 import { buildStyleGuidance } from "./prompts/styleGuidance";
 import { Chapter, ChapterDepthWeight, Course, CourseDifficulty, ExplanationStyle, ExportJob, GenerationJob, LearningMode, QualityReport, UsageEvent } from "./types";
+import { resolveModelOverrides } from "./userModelConfig";
 
 export const ACTIVE_ADMIN_JOB_STATUSES: GenerationJob["status"][] = ["pending", "queued", "running", "retrying"];
 export const INACTIVE_ADMIN_JOB_STATUSES: GenerationJob["status"][] = ["succeeded", "failed"];
@@ -1119,7 +1120,7 @@ export async function retryAdminJob(jobId: string, context: AdminActionContext) 
   assertAdminNoError("读取待重试任务", error);
   if (!data?.payload) throw new Error("任务不存在。");
   const job = data.payload as GenerationJob;
-  const modelOverrides = job.modelOverrides ?? await findAdminModelOverridesForChapter(job.courseId, job.chapterId);
+  const modelOverrides = await findAdminModelOverridesForChapter(job.courseId, job.chapterId, job.userId);
   const retryAsGeneration = await shouldRetryAdminJobAsGeneration(job);
   if (job.status !== "failed") throw new Error("只有失败任务可以重试。");
   const now = new Date().toISOString();
@@ -1176,7 +1177,7 @@ export async function enqueueAdminChapterReview(courseId: string, chapterId: str
   const existing = await findActiveAdminChapterJob(chapterId);
   if (existing) return existing;
 
-  const modelOverrides = await findAdminModelOverridesForChapter(courseId, chapterId);
+  const modelOverrides = await findAdminModelOverridesForChapter(courseId, chapterId, course.userId);
   const job = createGenerationJob({
     type: "chapter",
     mode: "review_draft",
@@ -1206,7 +1207,7 @@ export async function enqueueAdminChapterGeneration(courseId: string, chapterId:
   const existing = await findActiveAdminChapterJob(chapterId);
   if (existing) return existing;
 
-  const modelOverrides = await findAdminModelOverridesForChapter(courseId, chapterId);
+  const modelOverrides = await findAdminModelOverridesForChapter(courseId, chapterId, course.userId);
   const job = createGenerationJob({
     type: "chapter",
     courseId,
@@ -1304,7 +1305,11 @@ async function shouldRetryAdminJobAsGeneration(job: GenerationJob) {
   return Boolean(chapter && !hasChapterBody(chapter));
 }
 
-async function findAdminModelOverridesForChapter(courseId?: string, chapterId?: string): Promise<ModelOverrides | undefined> {
+async function findAdminModelOverridesForChapter(
+  courseId?: string,
+  chapterId?: string,
+  userId?: string,
+): Promise<ModelOverrides | undefined> {
   const supabase = requireAdminSupabaseClient();
   const rows: Array<{ payload: unknown; updated_at?: string | null; created_at?: string | null }> = [];
 
@@ -1331,13 +1336,21 @@ async function findAdminModelOverridesForChapter(courseId?: string, chapterId?: 
   }
 
   rows.sort((a, b) => Date.parse(b.updated_at ?? b.created_at ?? "") - Date.parse(a.updated_at ?? a.created_at ?? ""));
+  let savedOverrides: ModelOverrides | undefined;
   for (const row of rows) {
     const job = row.payload as Partial<GenerationJob> | undefined;
     const overrides = normalizeModelOverrides(job?.modelOverrides);
-    if (overrides) return overrides;
+    if (overrides) {
+      savedOverrides = overrides;
+      break;
+    }
   }
 
-  return undefined;
+  // Admin-triggered regeneration must resolve models exactly like public
+  // generation: saved job overrides win, then the user's current profile,
+  // then administrator defaults. This also picks up newly configured text
+  // models when an older job only carried an image-model override.
+  return resolveModelOverrides(userId, savedOverrides);
 }
 
 async function updateGenerationJobRow(job: GenerationJob) {
