@@ -16,10 +16,10 @@ test("ordinary plain text tasks prefer Chat with Responses fallback", () => {
   );
 });
 
-test("continuable long-form tasks prefer Responses", () => {
+test("continuable long-form tasks keep the stable Chat-first delivery path", () => {
   assert.deepEqual(
     resolveAIProtocolOrder({ continueOnOutputLimit: true }),
-    ["responses", "chat_completions"],
+    ["chat_completions", "responses"],
   );
 });
 

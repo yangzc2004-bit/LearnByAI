@@ -25,7 +25,7 @@ export async function runGenerationWorkerOnce({
   if (limit) body.limit = readPositiveInteger(limit, "GENERATION_WORKER_LIMIT");
   if (recover === true || recover === "true") body.recover = true;
 
-  const requestTimeoutMs = readOptionalPositiveInteger(timeoutMs, "GENERATION_WORKER_REQUEST_TIMEOUT_MS") ?? 20 * 60 * 1000;
+  const requestTimeoutMs = readOptionalPositiveInteger(timeoutMs, "GENERATION_WORKER_REQUEST_TIMEOUT_MS") ?? 60 * 60 * 1000;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
   let response;

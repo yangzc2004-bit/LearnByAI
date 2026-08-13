@@ -5,6 +5,7 @@ import { runGenerationWorkerOnce } from "./run-generation-worker-once.mjs";
 const idleMs = readPositiveInteger(process.env.GENERATION_WORKER_IDLE_MS, 5_000);
 const errorMs = readPositiveInteger(process.env.GENERATION_WORKER_ERROR_MS, 15_000);
 const concurrency = Math.min(readPositiveInteger(process.env.GENERATION_WORKER_CONCURRENCY, 1), 4);
+const jobsPerRequest = readPositiveInteger(process.env.GENERATION_WORKER_LIMIT, 1);
 
 let stopping = false;
 for (const signal of ["SIGINT", "SIGTERM"]) {
@@ -22,7 +23,7 @@ async function runWorkerSlot(slot) {
   if (slot > 1) await delay(Math.min((slot - 1) * 1_000, idleMs));
   while (!stopping) {
     try {
-      const result = await runGenerationWorkerOnce({ limit: process.env.GENERATION_WORKER_LIMIT ?? "8" });
+      const result = await runGenerationWorkerOnce({ limit: String(jobsPerRequest) });
       const processed = Number(result?.processed ?? 0);
       const scanned = Number(result?.scanned ?? 0);
       console.log(

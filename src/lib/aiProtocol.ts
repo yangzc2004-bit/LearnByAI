@@ -8,7 +8,7 @@ export function resolveAIProtocolOrder(input: {
 }): AIProtocol[] {
   const preferred = input.preference && input.preference !== "auto"
     ? input.preference
-    : input.responseFormat || input.continueOnOutputLimit
+    : input.responseFormat
       ? "responses"
       : "chat_completions";
 

@@ -17,6 +17,7 @@ type ProviderProtocol = AIProtocol;
 type ChatTokenParameter = "max_tokens" | "max_completion_tokens";
 const unsupportedResponsesCache = new Set<string>();
 const unsupportedChatCompletionsCache = new Set<string>();
+const degradedResponsesCache = new Set<string>();
 const chatTokenParameterCache = new Map<string, ChatTokenParameter>();
 const responsesOmittedParametersCache = new Map<string, Set<"temperature" | "thinking">>();
 
@@ -69,7 +70,10 @@ export async function generateText(
   let lastError: unknown;
 
   for (const protocol of protocols) {
-    if (protocol === "responses" && unsupportedResponsesCache.has(protocolKey)) continue;
+    if (
+      protocol === "responses"
+      && (unsupportedResponsesCache.has(protocolKey) || degradedResponsesCache.has(protocolKey))
+    ) continue;
     if (protocol === "chat_completions" && unsupportedChatCompletionsCache.has(protocolKey)) continue;
 
     try {
@@ -87,10 +91,14 @@ export async function generateText(
         continue;
       }
       if (error instanceof ResponsesContinuationUnsupportedError) {
+        degradedResponsesCache.add(protocolKey);
         logProtocolFallback(config, "responses", "chat_completions", error);
         continue;
       }
       if (error instanceof OutputLimitError && options?.continueOnOutputLimit) {
+        if (protocol === "responses" && !error.partialText.trim()) {
+          degradedResponsesCache.add(protocolKey);
+        }
         logProtocolFallback(config, protocol, alternateProtocol(protocol), error);
         continue;
       }

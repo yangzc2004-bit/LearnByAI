@@ -3,6 +3,7 @@ import { expectedChapterHeading } from "../chapterHeadings";
 import { appendJobEvent, getGenerationJob, patchGenerationJob } from "../jobs";
 import { ModelOverrides } from "../modelOverrides";
 import { buildChapterWriterPrompt } from "../prompts/chapterWriter";
+import { safeErrorMessage } from "../safeError";
 import { Chapter, ChapterHarnessCheckpoint, Course, GenerationJob } from "../types";
 import { dispatchAgentText } from "./dispatcher";
 
@@ -56,26 +57,15 @@ export async function runChapterAuthorHarness(
       stageIndex: index,
       completedText: completed.join("\n\n"),
     });
-    const text = await dispatchAgentText({
-      agent: "AUTHOR",
-      jobId: options.jobId,
+    const text = await generateValidatedHarnessStage({
+      course,
+      chapter,
+      stage,
+      stageIndex: index,
       prompt,
-      temperature: 0.45,
       maxTokens: stage.kind === "closing" ? Math.min(perStageTokens, 4_096) : perStageTokens,
-      protocol: "responses",
-      continueOnOutputLimit: true,
-      maxContinuationSegments: 2,
-      continuationUsePreviousResponseId: false,
-      continuationPrompt: ({ accumulatedText }) => buildHarnessStageContinuationPrompt(
-        prompt,
-        accumulatedText,
-      ),
-      validateContinuation: validateHarnessContinuation,
-      overrides: options.overrides,
-      mock: () => mockHarnessStage(course, chapter, stage, index),
-      onJobUpdate: options.onJobUpdate,
+      options,
     });
-    validateHarnessStageOutput(stage, text, index);
     completed.push(text.trim());
     await saveHarnessCheckpoint(options, {
       version: 1,
@@ -93,6 +83,61 @@ export async function runChapterAuthorHarness(
   const chapterText = completed.join("\n\n").trim();
   validateCompletedHarnessChapter(course, chapter, stages, chapterText);
   return chapterText;
+}
+
+async function generateValidatedHarnessStage(input: {
+  course: Course;
+  chapter: Chapter;
+  stage: HarnessStage;
+  stageIndex: number;
+  prompt: string;
+  maxTokens: number;
+  options: {
+    jobId: string;
+    overrides?: ModelOverrides;
+    onJobUpdate?: (job: GenerationJob) => Promise<void> | void;
+  };
+}) {
+  let prompt = input.prompt;
+  let validationError: unknown;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) {
+      await reportHarnessStageRetry(input.options, input.stage, validationError);
+      prompt = buildHarnessStageRetryPrompt(input.prompt, input.stage, validationError);
+    }
+
+    const text = await dispatchAgentText({
+      agent: "AUTHOR",
+      jobId: input.options.jobId,
+      prompt,
+      temperature: 0.45,
+      maxTokens: input.maxTokens,
+      maxAttempts: 1,
+      continueOnOutputLimit: true,
+      maxContinuationSegments: 3,
+      continuationUsePreviousResponseId: false,
+      continuationPrompt: ({ accumulatedText }) => buildHarnessStageContinuationPrompt(
+        prompt,
+        accumulatedText,
+      ),
+      validateContinuation: validateHarnessContinuation,
+      overrides: input.options.overrides,
+      mock: () => mockHarnessStage(input.course, input.chapter, input.stage, input.stageIndex),
+      onJobUpdate: input.options.onJobUpdate,
+    });
+
+    try {
+      validateHarnessStageOutput(input.stage, text, input.stageIndex);
+      return text;
+    } catch (error) {
+      validationError = error;
+    }
+  }
+
+  throw validationError instanceof Error
+    ? validationError
+    : new Error(`AUTHOR harness stage ${input.stage.id} failed validation.`);
 }
 
 export function buildChapterHarnessStages(
@@ -200,6 +245,21 @@ ${accumulatedText}
 </partial_stage>`;
 }
 
+function buildHarnessStageRetryPrompt(
+  stagePrompt: string,
+  stage: HarnessStage,
+  error: unknown,
+) {
+  return `${stagePrompt}
+
+# Harness stage validation retry
+
+The previous attempt for stage "${stage.label}" was rejected by the deterministic validator:
+${safeErrorMessage(error, "The stage output violated its structural contract.")}
+
+Regenerate only the current stage from scratch. Follow the exact required headings and every stage rule above. Do not mention this retry or the rejected output.`;
+}
+
 function validateHarnessContinuation(text: string) {
   if (isMissingContextRefusal(text)) {
     throw new Error("AUTHOR Responses continuation lost the chapter harness context.");
@@ -299,6 +359,22 @@ async function reportHarnessResume(
     agent: "AUTHOR",
     status: "running",
     message: `Chapter contract harness restored ${completedStageCount}/${stageCount} validated stages; resuming at stage ${completedStageCount + 1}.`,
+  }, { preserveJobStatus: true });
+  if (job) await options.onJobUpdate?.(job);
+}
+
+async function reportHarnessStageRetry(
+  options: {
+    jobId: string;
+    onJobUpdate?: (job: GenerationJob) => Promise<void> | void;
+  },
+  stage: HarnessStage,
+  error: unknown,
+) {
+  const job = appendJobEvent(options.jobId, {
+    agent: "AUTHOR",
+    status: "running",
+    message: `Chapter contract harness is retrying stage ${stage.id} after validation rejected its structure: ${safeErrorMessage(error, "regenerate with the exact required headings")}.`,
   }, { preserveJobStatus: true });
   if (job) await options.onJobUpdate?.(job);
 }
