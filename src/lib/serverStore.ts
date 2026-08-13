@@ -22,6 +22,7 @@ const LOCAL_STORE_STALE_LOCK_MS = 30_000;
 const ACTIVE_GENERATION_JOB_STATUSES: GenerationJob["status"][] = ["pending", "queued", "retrying", "running"];
 const GENERATION_HEARTBEAT_STALE_MS = readPositiveInteger(process.env.GENERATION_HEARTBEAT_STALE_MS, 5 * 60 * 1000);
 let localStoreWriteQueue = Promise.resolve();
+const courseUpdateLocks = new Map<string, Promise<void>>();
 
 type LocalStore = {
   courses: Course[];
@@ -62,7 +63,7 @@ export async function saveServerCourse(course: Course, request?: Request) {
 
   await requireSupabaseWrite(
     "Persist course",
-    supabase.from("courses").upsert({
+    () => supabase.from("courses").upsert({
       id: nextCourse.id,
       user_id: userId,
       topic: nextCourse.topic,
@@ -78,7 +79,7 @@ export async function saveServerCourse(course: Course, request?: Request) {
   const keptChapterIds = nextCourse.chapters.map((chapter) => chapter.id).filter(isUuid);
   await requireSupabaseWrite(
     "Prune stale chapters",
-    keptChapterIds.length
+    () => keptChapterIds.length
       ? supabase.from("chapters").delete().eq("course_id", nextCourse.id).not("id", "in", `(${keptChapterIds.join(",")})`)
       : supabase.from("chapters").delete().eq("course_id", nextCourse.id),
   );
@@ -89,7 +90,7 @@ export async function saveServerCourse(course: Course, request?: Request) {
       .map((chapter, index) =>
         requireSupabaseWrite(
           "Persist chapter",
-          supabase.from("chapters").upsert({
+          () => supabase.from("chapters").upsert({
             id: chapter.id,
             course_id: nextCourse.id,
             user_id: userId,
@@ -104,19 +105,21 @@ export async function saveServerCourse(course: Course, request?: Request) {
   );
 
   await Promise.all(
-    nextCourse.chapters.flatMap((chapter) => [
-      chapter.qualityReport && isUuid(chapter.qualityReport.id) && isUuid(chapter.qualityReport.targetId)
+    nextCourse.chapters.flatMap((chapter) => {
+      const qualityReport = chapter.qualityReport;
+      return [
+      qualityReport && isUuid(qualityReport.id) && isUuid(qualityReport.targetId)
         ? requireSupabaseWrite(
             "Persist quality report",
-            supabase.from("quality_reports").upsert({
-              id: chapter.qualityReport.id,
+            () => supabase.from("quality_reports").upsert({
+              id: qualityReport.id,
               user_id: userId,
-              target_type: chapter.qualityReport.targetType,
-              target_id: chapter.qualityReport.targetId,
-              score: chapter.qualityReport.score,
-              status: chapter.qualityReport.status,
-              payload: chapter.qualityReport,
-              created_at: chapter.qualityReport.createdAt,
+              target_type: qualityReport.targetType,
+              target_id: qualityReport.targetId,
+              score: qualityReport.score,
+              status: qualityReport.status,
+              payload: qualityReport,
+              created_at: qualityReport.createdAt,
             }),
           )
         : Promise.resolve(),
@@ -125,7 +128,7 @@ export async function saveServerCourse(course: Course, request?: Request) {
         ? [
             requireSupabaseWrite(
               "Delete stale sections",
-              supabase.from("sections").delete().eq("chapter_id", chapter.id),
+              () => supabase.from("sections").delete().eq("chapter_id", chapter.id),
             ).catch(() => {
               // Ignore delete failure so upserts below still attempt to overwrite by id
             }),
@@ -134,7 +137,7 @@ export async function saveServerCourse(course: Course, request?: Request) {
       ...(chapter.sections ?? []).filter((section) => isUuid(section.id) && isUuid(section.chapterId)).map((section) =>
         requireSupabaseWrite(
           "Persist section",
-          supabase.from("sections").upsert({
+          () => supabase.from("sections").upsert({
             id: section.id,
             chapter_id: chapter.id,
             course_id: nextCourse.id,
@@ -147,7 +150,8 @@ export async function saveServerCourse(course: Course, request?: Request) {
           }),
         ),
       ),
-    ]),
+    ];
+    }),
   );
 
   return publishSavedCourse(nextCourse);
@@ -436,10 +440,105 @@ export async function updateServerChapter(
   patch: Partial<Course["chapters"][number]>,
   request?: Request,
 ) {
-  const chapters = course.chapters.map((chapter) =>
-    chapter.id === chapterId ? { ...chapter, ...patch } : chapter,
+  return withCourseUpdateLock(course.id, async () => {
+    // Concurrent chapter workers may have started from the same course
+    // snapshot. Re-read inside the short persistence lock so one chapter
+    // update cannot overwrite another chapter that finished moments earlier.
+    const latestCourse = await getServerCourse(course.id, request) ?? course;
+    const chapters = latestCourse.chapters.map((chapter) =>
+      chapter.id === chapterId ? { ...chapter, ...patch } : chapter,
+    );
+    return saveServerChapterUpdate({ ...latestCourse, chapters }, chapterId, request);
+  });
+}
+
+async function saveServerChapterUpdate(course: Course, chapterId: string, request?: Request) {
+  const userId = await resolveUserId(request);
+  const nextCourse = {
+    ...course,
+    userId,
+    updatedAt: new Date().toISOString(),
+  };
+  const chapterIndex = nextCourse.chapters.findIndex((chapter) => chapter.id === chapterId);
+  const chapter = nextCourse.chapters[chapterIndex];
+  if (!chapter) throw new Error("Chapter not found while persisting chapter update.");
+
+  localCourses.set(nextCourse.id, nextCourse);
+  await persistLocalStore();
+
+  const supabase = createSupabaseServiceClient();
+  if (!supabase || !isUuid(userId) || !isUuid(nextCourse.id) || !isUuid(chapter.id)) {
+    return publishSavedCourse(nextCourse);
+  }
+
+  await requireSupabaseWrite(
+    "Persist course",
+    () => supabase.from("courses").upsert({
+      id: nextCourse.id,
+      user_id: userId,
+      topic: nextCourse.topic,
+      goal: nextCourse.goal,
+      payload: nextCourse,
+      created_at: nextCourse.createdAt,
+      updated_at: nextCourse.updatedAt,
+    }),
   );
-  return saveServerCourse({ ...course, chapters }, request);
+  await requireSupabaseWrite(
+    "Persist chapter",
+    () => supabase.from("chapters").upsert({
+      id: chapter.id,
+      course_id: nextCourse.id,
+      user_id: userId,
+      title: chapter.title,
+      status: chapter.status ?? "pending",
+      order_index: chapterIndex,
+      payload: chapter,
+      updated_at: nextCourse.updatedAt,
+    }),
+  );
+
+  const qualityReport = chapter.qualityReport;
+  if (qualityReport && isUuid(qualityReport.id) && isUuid(qualityReport.targetId)) {
+    await requireSupabaseWrite(
+      "Persist quality report",
+      () => supabase.from("quality_reports").upsert({
+        id: qualityReport.id,
+        user_id: userId,
+        target_type: qualityReport.targetType,
+        target_id: qualityReport.targetId,
+        score: qualityReport.score,
+        status: qualityReport.status,
+        payload: qualityReport,
+        created_at: qualityReport.createdAt,
+      }),
+    );
+  }
+
+  // A chapter update owns its section mirror. Delete first even when the new
+  // section list is empty so regeneration cannot leave stale reader anchors.
+  await requireSupabaseWrite(
+    "Delete stale sections",
+    () => supabase.from("sections").delete().eq("chapter_id", chapter.id),
+  );
+  for (const section of chapter.sections ?? []) {
+    if (!isUuid(section.id) || !isUuid(section.chapterId)) continue;
+    await requireSupabaseWrite(
+      "Persist section",
+      () => supabase.from("sections").upsert({
+        id: section.id,
+        chapter_id: chapter.id,
+        course_id: nextCourse.id,
+        user_id: userId,
+        title: section.title,
+        status: section.status,
+        order_index: section.order,
+        payload: section,
+        updated_at: nextCourse.updatedAt,
+      }),
+    );
+  }
+
+  return publishSavedCourse(nextCourse);
 }
 
 export async function saveServerAnnotation(annotation: Annotation, request?: Request) {
@@ -1546,9 +1645,46 @@ function publishSavedGenerationJob(job: GenerationJob) {
   return job;
 }
 
-async function requireSupabaseWrite(label: string, operation: PromiseLike<SupabaseResult>) {
-  const { error } = await operation;
-  assertSupabaseNoError(label, error);
+async function requireSupabaseWrite(
+  label: string,
+  operation: PromiseLike<SupabaseResult> | (() => PromiseLike<SupabaseResult>),
+) {
+  const maxAttempts = typeof operation === "function" ? 3 : 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const { error } = await (typeof operation === "function" ? operation() : operation);
+    if (!error) return;
+    if (attempt >= maxAttempts || !isTransientSupabaseError(error)) {
+      assertSupabaseNoError(label, error);
+    }
+    await delay(250 * 2 ** (attempt - 1));
+  }
+}
+
+async function withCourseUpdateLock<T>(courseId: string, operation: () => Promise<T>) {
+  const previous = courseUpdateLocks.get(courseId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.then(() => current);
+  courseUpdateLocks.set(courseId, queued);
+
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (courseUpdateLocks.get(courseId) === queued) {
+      courseUpdateLocks.delete(courseId);
+    }
+  }
+}
+
+function isTransientSupabaseError(error: SupabaseErrorLike) {
+  const detail = `${error.code ?? ""} ${error.message ?? ""} ${error.details ?? ""} ${error.hint ?? ""}`;
+  return /(?:PGRST000|PGRST002|fetch failed|invalid response|upstream|bad gateway|gateway timeout|timed? out|connection (?:closed|reset)|\b50[234]\b)/iu.test(
+    detail,
+  );
 }
 
 async function resolveGenerationJobCourseId(
