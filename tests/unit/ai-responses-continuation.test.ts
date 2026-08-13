@@ -179,6 +179,50 @@ test("automatic long-form routing uses Chat while keeping contract-aware continu
   }
 });
 
+test("Chat output limits stay in the Chat route instead of switching to Responses", async () => {
+  const originalFetch = globalThis.fetch;
+  const endpoints: string[] = [];
+
+  globalThis.fetch = async (input) => {
+    endpoints.push(String(input));
+    return Response.json({
+      choices: [{
+        message: { content: "partial stage" },
+        finish_reason: "length",
+      }],
+    });
+  };
+
+  try {
+    await assert.rejects(
+      () => generateText("STRICT_CHAPTER_CONTRACT", {
+        agent: "AUTHOR",
+        maxTokens: 1024,
+        stream: false,
+        continueOnOutputLimit: true,
+        maxContinuationSegments: 1,
+        overrides: {
+          version: 1,
+          agents: {
+            AUTHOR: {
+              apiKey: "test-key",
+              baseUrl: "https://chat-output-limit.test/v1",
+              model: "test-chat-model",
+            },
+          },
+        },
+      }),
+      /still reached the output limit/u,
+    );
+    assert.deepEqual(endpoints, [
+      "https://chat-output-limit.test/v1/chat/completions",
+      "https://chat-output-limit.test/v1/chat/completions",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("Responses with no visible progress are circuit-broken for later calls", async () => {
   const originalFetch = globalThis.fetch;
   const endpoints: string[] = [];

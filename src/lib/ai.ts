@@ -98,9 +98,12 @@ export async function generateText(
       if (error instanceof OutputLimitError && options?.continueOnOutputLimit) {
         if (protocol === "responses" && !error.partialText.trim()) {
           degradedResponsesCache.add(protocolKey);
+          logProtocolFallback(config, "responses", "chat_completions", error);
+          continue;
         }
-        logProtocolFallback(config, protocol, alternateProtocol(protocol), error);
-        continue;
+        // An output limit is a task-sizing concern, not evidence that the
+        // other provider protocol can finish the same long-form request.
+        throw error;
       }
       throw error;
     }
@@ -973,10 +976,6 @@ function appendContinuation(existing: string, continuation: string) {
   }
   const separator = existing.endsWith("\n") || continuation.startsWith("\n") ? "" : "\n";
   return `${existing}${separator}${continuation}`;
-}
-
-function alternateProtocol(protocol: ProviderProtocol): ProviderProtocol {
-  return protocol === "responses" ? "chat_completions" : "responses";
 }
 
 function logProtocolFallback(

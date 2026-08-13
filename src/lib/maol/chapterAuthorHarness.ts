@@ -101,32 +101,31 @@ async function generateValidatedHarnessStage(input: {
   let prompt = input.prompt;
   let validationError: unknown;
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     if (attempt > 0) {
       await reportHarnessStageRetry(input.options, input.stage, validationError);
       prompt = buildHarnessStageRetryPrompt(input.prompt, input.stage, validationError);
     }
 
-    const text = await dispatchAgentText({
-      agent: "AUTHOR",
-      jobId: input.options.jobId,
-      prompt,
-      temperature: 0.45,
-      maxTokens: input.maxTokens,
-      continueOnOutputLimit: true,
-      maxContinuationSegments: 3,
-      continuationUsePreviousResponseId: false,
-      continuationPrompt: ({ accumulatedText }) => buildHarnessStageContinuationPrompt(
-        prompt,
-        accumulatedText,
-      ),
-      validateContinuation: validateHarnessContinuation,
-      overrides: input.options.overrides,
-      mock: () => mockHarnessStage(input.course, input.chapter, input.stage, input.stageIndex),
-      onJobUpdate: input.options.onJobUpdate,
-    });
-
     try {
+      const text = await dispatchAgentText({
+        agent: "AUTHOR",
+        jobId: input.options.jobId,
+        prompt,
+        temperature: 0.45,
+        maxTokens: input.maxTokens,
+        continueOnOutputLimit: true,
+        maxContinuationSegments: 2,
+        continuationUsePreviousResponseId: false,
+        continuationPrompt: ({ accumulatedText }) => buildHarnessStageContinuationPrompt(
+          prompt,
+          accumulatedText,
+        ),
+        validateContinuation: validateHarnessContinuation,
+        overrides: input.options.overrides,
+        mock: () => mockHarnessStage(input.course, input.chapter, input.stage, input.stageIndex),
+        onJobUpdate: input.options.onJobUpdate,
+      });
       validateHarnessStageOutput(input.stage, text, input.stageIndex);
       return text;
     } catch (error) {
@@ -229,6 +228,8 @@ ${firstStage
 - Do not write any pending stage or closing block early.
 - Do not output a preface, status report, JSON, or a whole-document code fence.
 - A complete fenced code block must start and end on separate lines.
+- Target 800 to 1,400 Chinese characters of explanatory prose for this stage, excluding formulas, tables, and code. Prefer one compact example over repeated exposition.
+- Finish within this stage's scope at a clean Markdown boundary; do not keep expanding merely to make the chapter longer.
 - Finish this stage at a clean Markdown boundary.`;
 }
 
@@ -311,8 +312,8 @@ function validateCompletedHarnessChapter(
 }
 
 function stageTokenBudget(totalTokens: number, stageCount: number) {
-  const proportional = Math.ceil(totalTokens / Math.max(1, stageCount) * 1.35);
-  return Math.max(4_096, Math.min(8_192, proportional));
+  const proportional = Math.ceil(totalTokens / Math.max(1, stageCount) * 0.8);
+  return Math.max(2_048, Math.min(3_072, proportional));
 }
 
 function stripSectionNumber(value: string) {
