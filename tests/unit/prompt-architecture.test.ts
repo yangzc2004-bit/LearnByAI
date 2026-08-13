@@ -10,7 +10,8 @@ import {
   buildCourseSkeletonCompactPrompt,
 } from "../../src/lib/prompts/coursePlanner";
 import type { CourseSkeleton } from "../../src/lib/prompts/coursePlanner";
-import { reviewerRubric } from "../../src/lib/prompts/textbookSkill";
+import { buildAnnotationTutorPrompt } from "../../src/lib/prompts/annotationTutor";
+import { reviewerRubric, tutorSkill } from "../../src/lib/prompts/textbookSkill";
 import { Chapter, Course } from "../../src/lib/types";
 
 test("course planner prompt asks for chapter contracts", () => {
@@ -245,6 +246,44 @@ test("course planning prompts require explicit transitions at section boundaries
   assert.match(skeletonPrompt, /控制论.*智能体与 AI/u);
   assert.match(skeletonPrompt, /ABM.*局部规则涌现/u);
   assert.match(contractPrompt, /禁止泛泛写“承上启下”/u);
+});
+
+test("tutor prompt grounds answers in the chapter map and citation markers", () => {
+  const prompt = buildAnnotationTutorPrompt({
+    topic: "信号处理",
+    selectedText: "傅里叶变换把信号分解为频率分量。",
+    question: "为什么需要频率分解？",
+    history: [],
+    context: {
+      chapterTitle: "频域分析",
+      sectionMap: [
+        { label: "§1", title: "傅里叶级数", purpose: "周期信号的频域表示" },
+        { label: "§2", title: "傅里叶变换", purpose: "非周期信号的频域表示" },
+      ],
+      sectionContent: "傅里叶变换把信号分解为频率分量。",
+    },
+  });
+
+  assert.match(prompt, /章节地图/u);
+  assert.match(prompt, /§1 傅里叶级数/u);
+  assert.match(prompt, /选中段落所在小节的正文/u);
+  assert.doesNotMatch(prompt, /summaryForNext/u);
+
+  const skill = tutorSkill();
+  assert.match(skill, /引用与依据/u);
+  assert.match(skill, /教材正文未覆盖/u);
+  assert.match(skill, /教材外补充/u);
+});
+
+test("tutor prompt dedupes a trailing user question already present in history", () => {
+  const prompt = buildAnnotationTutorPrompt({
+    topic: "信号处理",
+    selectedText: "",
+    question: "卷积是什么？",
+    history: [{ role: "user", content: "卷积是什么？" }],
+  });
+
+  assert.equal((prompt.match(/卷积是什么？/gu) ?? []).length, 1);
 });
 
 function makeCourse(depthWeight: Chapter["depthWeight"]): Course {

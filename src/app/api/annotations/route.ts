@@ -7,9 +7,10 @@ import { safeErrorMessage } from "@/lib/safeError";
 import { deleteServerAnnotation, getServerCourse, listServerAnnotations, saveServerAnnotation, saveServerGenerationJob } from "@/lib/serverStore";
 import { encodeSseEvent } from "@/lib/sse";
 import { resolveModelOverrides } from "@/lib/userModelConfig";
-import { Annotation, Chapter, Course } from "@/lib/types";
+import { buildSectionIndex, extractCitations } from "@/lib/citations";
+import { Annotation, Chapter, Course, Section } from "@/lib/types";
 
-const TUTOR_ROUTE_TIMEOUT_MS = 65_000;
+const TUTOR_ROUTE_TIMEOUT_MS = 125_000;
 
 export const dynamic = "force-dynamic";
 
@@ -18,12 +19,15 @@ export async function GET(request: Request) {
   if ("response" in auth) return auth.response;
 
   const { searchParams } = new URL(request.url);
-  const chapterId = searchParams.get("chapterId");
-  if (!chapterId) {
-    return NextResponse.json({ error: "chapterId is required" }, { status: 400 });
+  const chapterId = searchParams.get("chapterId") ?? undefined;
+  const courseId = searchParams.get("courseId") ?? undefined;
+  if (!chapterId && !courseId) {
+    return NextResponse.json({ error: "chapterId or courseId is required" }, { status: 400 });
   }
 
-  return NextResponse.json({ annotations: await listServerAnnotations(chapterId, request) });
+  return NextResponse.json({
+    annotations: await listServerAnnotations({ chapterId, courseId }, request),
+  });
 }
 
 export async function DELETE(request: Request) {
@@ -66,22 +70,7 @@ export async function POST(request: Request) {
         selectedText: input.selectedText,
         question: input.question,
         history: input.history ?? [],
-        context: course
-          ? {
-              goal: course.goal,
-              learnerProfile: course.profile,
-              teachingStyle: course.courseBible?.teachingStyle,
-              styles: course.styles,
-              learningMode: course.learningMode,
-              chapterTitle: chapter?.title,
-              chapterDescription: chapter?.description,
-              chapterPurpose: chapter?.purpose,
-              previousChapterTitle: previousChapter(course, chapter)?.title,
-              nextChapterTitle: nextChapter(course, chapter)?.title,
-              chapterSummary: chapter?.contract?.summaryForNext,
-              terminology: course.courseBible?.terminology,
-            }
-          : undefined,
+        context: buildTutorContext(course, chapter, anchor.annotation, input.question as string | undefined, input.selectedText as string | undefined),
         overrides,
         onJobUpdate: async (updatedJob) => {
           await saveServerGenerationJob(updatedJob, request);
@@ -95,6 +84,7 @@ export async function POST(request: Request) {
       const clientAnnotation = stripClientOnlyMessages(anchor.annotation);
       if (clientAnnotation) {
         const now = new Date().toISOString();
+        const citations = extractCitations(response.answer, buildSectionIndex(orderedSections(chapter)));
         annotation = clientAnnotation;
         annotation.messages = [
           ...annotation.messages,
@@ -102,10 +92,11 @@ export async function POST(request: Request) {
             id: crypto.randomUUID(),
             role: "assistant",
             content: response.answer,
+            ...(citations.length ? { citations } : {}),
           },
         ];
         annotation.createdAt = annotation.createdAt ?? now;
-        annotation = await saveServerAnnotation(annotation, request);
+        annotation = await saveServerAnnotation(withDerivedTitleSummary(annotation), request);
       }
 
       return { ...response, annotation };
@@ -116,8 +107,10 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result.value);
   } catch (error) {
+    const message = tutorErrorMessage(error);
+    await persistFailedAnnotation(anchor.annotation, message, request);
     return NextResponse.json(
-      { error: tutorErrorMessage(error) },
+      { error: message },
       { status: 502 },
     );
   }
@@ -150,22 +143,7 @@ async function handleStreamingPost(params: {
             selectedText: input.selectedText as string,
             question: input.question as string,
             history: (input.history as { role: "user" | "assistant"; content: string }[]) ?? [],
-            context: course
-              ? {
-                  goal: course.goal,
-                  learnerProfile: course.profile,
-                  teachingStyle: course.courseBible?.teachingStyle,
-              styles: course.styles,
-              learningMode: course.learningMode,
-                  chapterTitle: chapter?.title,
-                  chapterDescription: chapter?.description,
-                  chapterPurpose: chapter?.purpose,
-                  previousChapterTitle: previousChapter(course, chapter)?.title,
-                  nextChapterTitle: nextChapter(course, chapter)?.title,
-                  chapterSummary: chapter?.contract?.summaryForNext,
-                  terminology: course.courseBible?.terminology,
-                }
-              : undefined,
+            context: buildTutorContext(course, chapter, anchor.annotation, input.question as string | undefined, input.selectedText as string | undefined),
             overrides,
             onChunk: (chunk) => {
               hasChunks = true;
@@ -191,6 +169,7 @@ async function handleStreamingPost(params: {
           const clientAnnotation = stripClientOnlyMessages(anchor.annotation);
           if (clientAnnotation) {
             const now = new Date().toISOString();
+            const citations = extractCitations(fullAnswer, buildSectionIndex(orderedSections(chapter)));
             const annotation = clientAnnotation;
             annotation.messages = [
               ...annotation.messages,
@@ -198,10 +177,11 @@ async function handleStreamingPost(params: {
                 id: crypto.randomUUID(),
                 role: "assistant",
                 content: fullAnswer,
+                ...(citations.length ? { citations } : {}),
               },
             ];
             annotation.createdAt = annotation.createdAt ?? now;
-            savedAnnotation = await saveServerAnnotation(annotation, request);
+            savedAnnotation = await saveServerAnnotation(withDerivedTitleSummary(annotation), request);
           }
 
           return { fullAnswer, savedAnnotation };
@@ -216,9 +196,9 @@ async function handleStreamingPost(params: {
           }));
         }
       } catch (error) {
-        enqueue("error", JSON.stringify({
-          error: tutorErrorMessage(error),
-        }));
+        const message = tutorErrorMessage(error);
+        await persistFailedAnnotation(anchor.annotation, message, request);
+        enqueue("error", JSON.stringify({ error: message }));
       } finally {
         controller.close();
       }
@@ -293,6 +273,129 @@ function nextChapter(course: Course | undefined, chapter: Chapter | undefined) {
   if (!course || !chapter) return undefined;
   const idx = course.chapters.findIndex((ch) => ch.id === chapter.id);
   return idx >= 0 && idx < course.chapters.length - 1 ? course.chapters[idx + 1] : undefined;
+}
+
+function orderedSections(chapter: Chapter | undefined): Section[] {
+  return [...(chapter?.sections ?? [])].sort((a, b) => a.order - b.order);
+}
+
+/**
+ * Grounded tutor context: injects the chapter's actual content (layered) plus a
+ * section map that doubles as the citation §index. The previously mislabeled
+ * `summaryForNext` is now surfaced only as `bridgeToNext`; `chapterSummary` is
+ * derived from the chapter itself, never from the next-chapter handoff note.
+ */
+function buildTutorContext(
+  course: Course | undefined,
+  chapter: Chapter | undefined,
+  annotation: Annotation | undefined,
+  question: string | undefined,
+  selectedText: string | undefined,
+) {
+  if (!course) return undefined;
+
+  const sections = orderedSections(chapter);
+  const sectionMap = sections.map((section, index) => ({
+    label: `§${index + 1}`,
+    title: section.title,
+    purpose: section.purpose,
+  }));
+  const anchoredSection = annotation?.sectionId
+    ? sections.find((section) => section.id === annotation.sectionId)
+    : undefined;
+
+  return {
+    goal: course.goal,
+    learnerProfile: course.profile,
+    teachingStyle: course.courseBible?.teachingStyle,
+    styles: course.styles,
+    learningMode: course.learningMode,
+    chapterTitle: chapter?.title,
+    chapterDescription: chapter?.description,
+    chapterPurpose: chapter?.purpose,
+    previousChapterTitle: previousChapter(course, chapter)?.title,
+    nextChapterTitle: nextChapter(course, chapter)?.title,
+    chapterSummary: deriveChapterSummary(chapter, sections),
+    bridgeToNext: chapter?.contract?.summaryForNext,
+    sectionMap,
+    sectionContent: anchoredSection ? truncateChars(anchoredSection.content, 4000) : undefined,
+    chapterContent: process.env.TUTOR_FULL_CHAPTER_CONTEXT === "true"
+      ? truncateChars(chapterContentText(chapter, sections), 30000)
+      : undefined,
+    terminology: selectRelevantTerminology(course.courseBible?.terminology, question ?? "", selectedText ?? ""),
+  };
+}
+
+/** Inject only terminology terms the question actually touches (max 8). */
+function selectRelevantTerminology(
+  terminology: { term: string; definition: string }[] | undefined,
+  question: string,
+  selectedText: string,
+) {
+  if (!terminology?.length) return undefined;
+  const haystack = `${question} ${selectedText}`.toLowerCase();
+  const matched = terminology
+    .filter((entry) => entry.term.length >= 2 && haystack.includes(entry.term.toLowerCase()))
+    .slice(0, 8);
+  return matched.length ? matched : undefined;
+}
+
+function deriveChapterSummary(chapter: Chapter | undefined, sections: Section[]): string | undefined {
+  if (!chapter) return undefined;
+  const parts: string[] = [];
+  if (chapter.description) parts.push(chapter.description);
+  if (sections.length) {
+    parts.push(`本章分 ${sections.length} 节：${sections.map((s, i) => `§${i + 1} ${s.title}`).join("、")}`);
+  }
+  return parts.length ? parts.join(" ") : undefined;
+}
+
+function chapterContentText(chapter: Chapter | undefined, sections: Section[]): string {
+  if (chapter?.content) return chapter.content;
+  return sections.map((section) => `## ${section.title}\n${section.content}`).join("\n\n");
+}
+
+function truncateChars(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n[内容过长，已截断]`;
+}
+
+/** Deterministic title/summary for the history list — no extra LLM call. */
+function withDerivedTitleSummary(annotation: Annotation): Annotation {
+  const title = annotation.title?.trim() || truncateText(annotation.question, 30);
+  const summary = annotation.summary?.trim() || firstParagraph(lastAssistantContent(annotation));
+  return { ...annotation, title, ...(summary ? { summary } : {}) };
+}
+
+function truncateText(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+
+function lastAssistantContent(annotation: Annotation): string {
+  const last = [...annotation.messages].reverse().find((message) => message.role === "assistant");
+  return last?.content?.trim() ?? "";
+}
+
+function firstParagraph(text: string): string {
+  const paragraph = text.split(/\n\s*\n/)[0] ?? "";
+  return truncateText(paragraph.trim(), 80);
+}
+
+/** Persist a failed question so the thread survives a refresh and can be retried. */
+async function persistFailedAnnotation(
+  annotation: Annotation | undefined,
+  errorMessage: string,
+  request: Request,
+) {
+  if (!annotation) return;
+  const failed: Annotation = {
+    ...annotation,
+    messages: [
+      ...stripClientOnlyMessages(annotation)!.messages,
+      { id: crypto.randomUUID(), role: "assistant", content: `⚠️ ${errorMessage}` },
+    ],
+  };
+  await saveServerAnnotation(withDerivedTitleSummary(failed), request).catch(() => undefined);
 }
 
 async function validateAnnotationAnchor(annotationInput: unknown, request: Request) {

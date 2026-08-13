@@ -92,6 +92,12 @@ function closestSectionId(node: Node | null) {
   return element?.closest<HTMLElement>("[data-section-id]")?.dataset.sectionId;
 }
 
+function loadPanelWidth(key: string, fallback: number): number {
+  if (typeof window === "undefined") return fallback;
+  const raw = Number(window.localStorage.getItem(key));
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
 function chapterStatusLabel(chapter: Chapter) {
   if (hasChapterBody(chapter) && chapter.qualityReport?.status) {
     return QUALITY_STATUS_LABEL[chapter.qualityReport.status] ?? CHAPTER_STATUS_LABEL[effectiveChapterStatus(chapter)];
@@ -123,6 +129,17 @@ export default function ReaderPage() {
   const [expandedChapters, setExpandedChapters] = useState<Record<string, boolean>>({});
   const [panel, setPanel] = useState<Panel>(null);
   const [chooser, setChooser] = useState<{ text: string; sectionId?: string } | null>(null);
+
+  const [tocWidth, setTocWidth] = useState(() => loadPanelWidth("learnbyai-toc-width", 256));
+  const [rightWidth, setRightWidth] = useState(() => loadPanelWidth("learnbyai-right-width", 400));
+
+  useEffect(() => {
+    window.localStorage.setItem("learnbyai-toc-width", String(tocWidth));
+  }, [tocWidth]);
+
+  useEffect(() => {
+    window.localStorage.setItem("learnbyai-right-width", String(rightWidth));
+  }, [rightWidth]);
 
   const chapter = course?.chapters.find((item) => item.id === chapterId);
   const currentIndex = course?.chapters.findIndex((c) => c.id === chapterId) ?? -1;
@@ -158,6 +175,36 @@ export default function ReaderPage() {
       return;
     }
     document.querySelector(`#section-${sectionId}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function jumpToSection(sectionId: string) {
+    document.querySelector(`#section-${sectionId}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function startPanelResize(event: MouseEvent<HTMLDivElement>, side: "toc" | "right") {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = side === "toc" ? tocWidth : rightWidth;
+    const min = side === "toc" ? 200 : 280;
+    const max = side === "toc" ? 520 : 760;
+
+    const onMove = (move: globalThis.MouseEvent) => {
+      const delta = side === "toc" ? move.clientX - startX : startX - move.clientX;
+      const width = Math.round(Math.min(max, Math.max(min, startWidth + delta)));
+      if (side === "toc") setTocWidth(width);
+      else setRightWidth(width);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
   }
 
   async function exportChapter() {
@@ -235,6 +282,28 @@ export default function ReaderPage() {
 
   const tutor = useTutor(course, chapterId);
   const revise = useRevise(course, chapterId, applyCourseUpdate);
+
+  // A thread opened from the cross-chapter history view lands here; restore it
+  // once this chapter's annotations have loaded.
+  const [pendingThreadId, setPendingThreadId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const pending = sessionStorage.getItem("learnbyai-pending-thread");
+    if (pending) {
+      sessionStorage.removeItem("learnbyai-pending-thread");
+      setPendingThreadId(pending);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!pendingThreadId) return;
+    const annotation = tutor.annotations.find((item) => item.id === pendingThreadId);
+    if (!annotation) return;
+    tutor.openThread(annotation);
+    setPanel("tutor");
+    setPendingThreadId(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingThreadId, tutor.annotations]);
 
   const ensureChapterContent = useCallback(async (stored: Course, options: { retry?: boolean } = {}) => {
     const current = stored.chapters.find((item) => item.id === chapterId);
@@ -433,9 +502,10 @@ export default function ReaderPage() {
     };
   }, [applyCourseUpdate, chapter, chapterGenerationJobId, chapterReadable, chapterStatus, id]);
 
-  const openTutorFromChooser = useCallback(() => {
+  const openTutorFromChooser = useCallback((mode: "continue" | "new") => {
     if (!chooser) return;
-    tutor.startAnchored(chooser.text, chooser.sectionId);
+    if (mode === "continue") tutor.continueAnchored(chooser.text, chooser.sectionId);
+    else tutor.startAnchored(chooser.text, chooser.sectionId);
     revise.clear();
     setPanel("tutor");
     setChooser(null);
@@ -477,7 +547,10 @@ export default function ReaderPage() {
   return (
     <div className="flex h-screen overflow-hidden bg-background print:block print:h-auto print:overflow-visible print:bg-white">
       {/* TOC Sidebar */}
-      <aside className={`shrink-0 border-r border-border bg-card transition-all duration-300 print:hidden ${tocOpen ? "w-64" : "w-0 overflow-hidden"}`}>
+      <aside
+        className="shrink-0 overflow-hidden bg-card print:hidden"
+        style={{ width: tocOpen ? tocWidth : 0 }}
+      >
         <div className="flex h-full flex-col">
           <div className="flex items-center justify-between border-b border-border px-4 py-4">
             <Link href="/" className="font-mono text-sm font-bold text-foreground tracking-widest uppercase">
@@ -548,6 +621,16 @@ export default function ReaderPage() {
           </div>
         </div>
       </aside>
+
+      {/* TOC resize divider */}
+      {tocOpen && (
+        <div
+          onMouseDown={(event) => startPanelResize(event, "toc")}
+          onDoubleClick={() => setTocWidth(256)}
+          className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/50 print:hidden"
+          title="拖动调整目录宽度（双击复位）"
+        />
+      )}
 
       {/* Main Content */}
       <main className="flex-1 overflow-y-auto bg-background print:overflow-visible print:bg-white print:text-black">
@@ -736,9 +819,31 @@ export default function ReaderPage() {
         </div>
       </main>
 
+      {/* Right drawer resize divider */}
+      {panel && (
+        <div
+          onMouseDown={(event) => startPanelResize(event, "right")}
+          onDoubleClick={() => setRightWidth(400)}
+          className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/50 print:hidden"
+          title="拖动调整面板宽度（双击复位）"
+        />
+      )}
+
       {/* Right drawer: mutually-exclusive Tutor / Revise panels */}
-      <aside className={`shrink-0 border-l border-border bg-muted/30 transition-all duration-300 print:hidden ${panel ? "w-80 lg:w-[400px]" : "w-0 overflow-hidden"}`}>
-        {panel === "tutor" && <TutorPanel tutor={tutor} onClose={() => setPanel(null)} />}
+      <aside
+        className="shrink-0 overflow-hidden bg-muted/30 print:hidden"
+        style={{ width: panel ? rightWidth : 0 }}
+      >
+        {panel === "tutor" && (
+          <TutorPanel
+            tutor={tutor}
+            courseId={id}
+            chapterId={chapterId}
+            chapterSections={sections}
+            onCitationClick={jumpToSection}
+            onClose={() => setPanel(null)}
+          />
+        )}
         {panel === "revise" && <RevisePanel revise={revise} onClose={() => setPanel(null)} />}
       </aside>
 
@@ -766,9 +871,20 @@ export default function ReaderPage() {
       {chooser && (
         <div className="fixed bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 shadow-xl print:hidden">
           <span className="max-w-[160px] truncate font-mono text-[10px] text-muted-foreground" title={chooser.text}>已选中：{chooser.text}</span>
-          <button onClick={openTutorFromChooser} className="flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-2 py-1 font-mono text-[10px] text-primary hover:bg-primary/15">
-            <Bot size={12} /> 问导师
-          </button>
+          {tutor.active ? (
+            <>
+              <button onClick={() => openTutorFromChooser("continue")} className="flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-2 py-1 font-mono text-[10px] text-primary hover:bg-primary/15">
+                <Bot size={12} /> 加入当前对话
+              </button>
+              <button onClick={() => openTutorFromChooser("new")} className="flex items-center gap-1 rounded border border-border bg-background px-2 py-1 font-mono text-[10px] text-muted-foreground hover:border-primary hover:text-primary">
+                <Bot size={12} /> 开新对话
+              </button>
+            </>
+          ) : (
+            <button onClick={() => openTutorFromChooser("new")} className="flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-2 py-1 font-mono text-[10px] text-primary hover:bg-primary/15">
+              <Bot size={12} /> 问导师
+            </button>
+          )}
           <button onClick={openReviseFromChooser} className="flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-2 py-1 font-mono text-[10px] text-primary hover:bg-primary/15">
             <PencilLine size={12} /> 改写此处
           </button>

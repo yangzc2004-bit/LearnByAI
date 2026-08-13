@@ -1,24 +1,43 @@
 "use client";
 
-import { FormEvent } from "react";
-import { Bot, MessageSquareQuote, SendHorizontal, Trash2, X } from "lucide-react";
-import { MarkdownContent } from "@/components/MarkdownContent";
+import { FormEvent, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { ArrowUp, Bot, MessageSquareQuote, SendHorizontal, Trash2, User, X } from "lucide-react";
+import { CitationChipData, MarkdownContent } from "@/components/MarkdownContent";
 import { useTutor } from "@/lib/hooks/useTutor";
-
-const quickQuestions = ["解释得更简单", "给我一个具体例子", "展示推导过程", "质疑这段内容"];
+import { Annotation, Section } from "@/lib/types";
 
 type TutorPanelProps = {
   tutor: ReturnType<typeof useTutor>;
+  courseId: string;
+  chapterId: string;
+  chapterSections: Section[];
+  onCitationClick: (sectionId: string) => void;
   onClose: () => void;
 };
 
-export function TutorPanel({ tutor, onClose }: TutorPanelProps) {
-  const { active, target, answering, annotations, error } = tutor;
+export function TutorPanel({
+  tutor,
+  courseId,
+  chapterId,
+  chapterSections,
+  onCitationClick,
+  onClose,
+}: TutorPanelProps) {
+  const router = useRouter();
+  const { active, target, answering, annotations, error, historyScope } = tutor;
   // A conversation context exists once a thread is open (active) or a target is
   // chosen. With neither, the panel shows the history "home" — but the composer
   // stays available so users can just start chatting (defaults to chapter 泛问).
   const inConversation = Boolean(active || target);
   const anchoredText = active?.selectedText ?? (target?.scope === "anchored" ? target.selectedText : undefined);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const returnScrollRef = useRef(0);
+  const [returnable, setReturnable] = useState(false);
+
+  const citationMap = useMemo(() => buildCitationMap(chapterSections), [chapterSections]);
+  const suggestions = quickQuestionsFor(Boolean(anchoredText));
 
   function submitQuestion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -28,6 +47,28 @@ export function TutorPanel({ tutor, onClose }: TutorPanelProps) {
     void tutor.ask(question).then((sent) => {
       if (sent) input.value = "";
     }).catch(() => undefined);
+  }
+
+  function handleCitationClick(sectionId: string) {
+    returnScrollRef.current = scrollRef.current?.scrollTop ?? 0;
+    setReturnable(true);
+    onCitationClick(sectionId);
+  }
+
+  function returnToAnswer() {
+    if (scrollRef.current) scrollRef.current.scrollTop = returnScrollRef.current;
+    setReturnable(false);
+  }
+
+  function openThreadInContext(annotation: Annotation) {
+    if (annotation.chapterId !== chapterId) {
+      // Citations jump within the rendered chapter's DOM, so a thread from
+      // another chapter must land on its own chapter first.
+      sessionStorage.setItem("learnbyai-pending-thread", annotation.id);
+      router.push(`/courses/${courseId}/chapters/${annotation.chapterId}`);
+      return;
+    }
+    tutor.openThread(annotation);
   }
 
   return (
@@ -42,16 +83,26 @@ export function TutorPanel({ tutor, onClose }: TutorPanelProps) {
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
         {inConversation ? (
           <div className="space-y-6">
             <div className="flex items-center justify-between gap-2">
-              <button
-                onClick={tutor.clear}
-                className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
-              >
-                ← 历史
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={tutor.clear}
+                  className="font-mono text-[10px] text-muted-foreground hover:text-foreground"
+                >
+                  ← 历史
+                </button>
+                {returnable && (
+                  <button
+                    onClick={returnToAnswer}
+                    className="inline-flex items-center gap-1 font-mono text-[10px] text-primary hover:underline"
+                  >
+                    <ArrowUp size={12} /> 返回回答
+                  </button>
+                )}
+              </div>
               {answering && (
                 <span className="font-mono text-[10px] text-primary animate-pulse">思考中...</span>
               )}
@@ -73,16 +124,26 @@ export function TutorPanel({ tutor, onClose }: TutorPanelProps) {
                   {anchoredText ? "向导师追问这段内容吧。" : "问点什么开始对话吧，下面也有常见追问。"}
                 </p>
               )}
-              {active?.messages.map((message) => (
-                <div key={message.id} className="flex flex-col gap-1">
-                  <span className={`font-mono text-[10px] ${message.role === "user" ? "text-primary" : "text-muted-foreground"}`}>
-                    {message.role === "user" ? "> USER" : "> TUTOR_AI"}
-                  </span>
-                  <div className={`prose prose-invert prose-sm max-w-none ${message.role === "user" ? "text-foreground" : "text-muted-foreground"}`}>
-                    <MarkdownContent content={message.content} />
+              {active?.messages.map((message) => {
+                const isUser = message.role === "user";
+                return (
+                  <div key={message.id} className={`flex flex-col gap-1 ${isUser ? "items-end" : "items-start"}`}>
+                    <span className={`inline-flex items-center gap-1 font-mono text-[10px] ${isUser ? "text-primary" : "text-muted-foreground"}`}>
+                      {isUser ? <User size={11} /> : <Bot size={11} />}
+                      {isUser ? "你" : "导师"}
+                    </span>
+                    <div className={isUser
+                      ? "min-w-0 max-w-[92%] break-words rounded-lg rounded-tr-none border border-primary/30 bg-primary/10 px-3 py-2 text-foreground"
+                      : "min-w-0 max-w-full break-words text-muted-foreground"}>
+                      <MarkdownContent
+                        content={message.content}
+                        citations={citationMap}
+                        onCitationClick={handleCitationClick}
+                      />
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               {answering && (
                 <button onClick={tutor.stop} className="font-mono text-[10px] text-primary animate-pulse hover:underline">
                   处理中... 点击停止
@@ -103,8 +164,22 @@ export function TutorPanel({ tutor, onClose }: TutorPanelProps) {
             >
               + 开启新对话
             </button>
+            <div className="flex gap-1">
+              <button
+                onClick={() => tutor.setHistoryScope("chapter")}
+                className={historyTabClass(historyScope === "chapter")}
+              >
+                本章
+              </button>
+              <button
+                onClick={() => tutor.setHistoryScope("course")}
+                className={historyTabClass(historyScope === "course")}
+              >
+                本课程
+              </button>
+            </div>
             <div className="font-mono text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
-              本章讨论档案 · {annotations.length}
+              讨论档案 · {annotations.length}
             </div>
             {annotations.length === 0 ? (
               <div className="flex flex-col items-center justify-center pt-12 text-center text-muted-foreground">
@@ -116,10 +191,10 @@ export function TutorPanel({ tutor, onClose }: TutorPanelProps) {
                 {annotations.map((annotation) => (
                   <div key={annotation.id} className="group flex items-start gap-1">
                     <button
-                      onClick={() => tutor.openThread(annotation)}
+                      onClick={() => openThreadInContext(annotation)}
                       className="flex-1 px-2 py-2 text-left text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
                     >
-                      <div className="text-xs line-clamp-1 font-medium">{annotation.question || annotation.title || "（无标题）"}</div>
+                      <div className="text-xs line-clamp-1 font-medium">{annotation.title || annotation.question || "（无标题）"}</div>
                       <div className="mt-0.5 text-[10px] line-clamp-1 text-muted-foreground/70">
                         {annotation.selectedText ?? annotation.summary ?? "整章泛问"}
                       </div>
@@ -144,7 +219,7 @@ export function TutorPanel({ tutor, onClose }: TutorPanelProps) {
         {error && <p className="mb-3 text-xs leading-relaxed text-destructive">{error}</p>}
         {inConversation && (
           <div className="mb-3 flex flex-wrap gap-2">
-            {quickQuestions.map((q) => (
+            {suggestions.map((q) => (
               <button
                 key={q}
                 onClick={() => void tutor.ask(q)}
@@ -180,6 +255,40 @@ export function TutorPanel({ tutor, onClose }: TutorPanelProps) {
       </div>
     </aside>
   );
+}
+
+function buildCitationMap(sections: Section[]): Record<string, CitationChipData> {
+  const map: Record<string, CitationChipData> = {};
+  [...sections]
+    .sort((a, b) => a.order - b.order)
+    .forEach((section, index) => {
+      const label = `§${index + 1}`;
+      map[label] = {
+        sectionId: section.id,
+        label,
+        title: section.title,
+        excerpt: truncate(section.content.replace(/\s+/g, " ").trim(), 120),
+      };
+    });
+  return map;
+}
+
+function truncate(text: string, max: number) {
+  return text.length <= max ? text : `${text.slice(0, max)}…`;
+}
+
+function quickQuestionsFor(anchored: boolean) {
+  return anchored
+    ? ["解释这段内容的直觉", "给我一个具体例子", "推导这里的公式", "质疑这段内容"]
+    : ["本章核心概念是什么", "给我一个具体例子", "梳理本章结构", "质疑本章内容"];
+}
+
+function historyTabClass(active: boolean) {
+  return `rounded px-2 py-1 font-mono text-[10px] transition-colors ${
+    active
+      ? "bg-primary/15 text-primary"
+      : "text-muted-foreground hover:text-foreground"
+  }`;
 }
 
 function formatTime(iso: string) {

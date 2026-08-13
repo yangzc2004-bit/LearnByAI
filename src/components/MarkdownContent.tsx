@@ -13,10 +13,20 @@ import "highlight.js/styles/github-dark.css";
 import { normalizeMermaidCode } from "@/lib/mermaid";
 import { prepareMarkdownForRender } from "@/lib/renderMarkdown";
 
+export type CitationChipData = {
+  sectionId: string;
+  label: string;
+  title: string;
+  excerpt: string;
+};
+
 interface MarkdownContentProps {
   content: string;
   onTextSelect?: (selectedText: string) => void;
   onParagraphDoubleClick?: (text: string) => void;
+  /** §label -> citation metadata; when present, [§n] markers render as chips. */
+  citations?: Record<string, CitationChipData>;
+  onCitationClick?: (sectionId: string) => void;
 }
 
 function getCodeText(node: ReactNode): string {
@@ -198,6 +208,8 @@ export function MarkdownContent({
   content,
   onTextSelect,
   onParagraphDoubleClick,
+  citations,
+  onCitationClick,
 }: MarkdownContentProps) {
   const handleMouseUp = () => {
     const selection = window.getSelection();
@@ -342,21 +354,60 @@ export function MarkdownContent({
           strong: ({ children }) => (
             <strong className="font-semibold text-foreground">{children}</strong>
           ),
-          a: ({ children, href }) => (
-            <a
-              href={href}
-              className="text-primary underline underline-offset-2 hover:text-primary/80"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {children}
-            </a>
-          ),
+          a: ({ children, href }) => {
+            if (typeof href === "string" && href.startsWith("cite://")) {
+              const label = `§${href.slice("cite://".length)}`;
+              const citation = citations?.[label];
+              return (
+                <button
+                  type="button"
+                  onClick={() => citation && onCitationClick?.(citation.sectionId)}
+                  title={citation ? `${citation.title}\n${citation.excerpt}` : undefined}
+                  className="mx-0.5 inline-flex cursor-pointer items-center rounded border border-primary/40 bg-primary/10 px-1 align-baseline font-mono text-[0.85em] text-primary transition-colors hover:bg-primary/20"
+                >
+                  {children}
+                </button>
+              );
+            }
+            return (
+              <a
+                href={href}
+                className="text-primary underline underline-offset-2 hover:text-primary/80"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {children}
+              </a>
+            );
+          },
           hr: () => <hr className="my-6 border-border" />,
         }}
       >
-        {prepareMarkdownForRender(content)}
+        {prepareMarkdownForRender(applyCitationLinks(content, citations))}
       </ReactMarkdown>
     </div>
   );
+}
+
+/**
+ * Convert resolvable `[§n]` markers into cite:// markdown links so the `a`
+ * override renders them as chips. Fenced code blocks are skipped so a marker
+ * inside a code sample is never corrupted into a link.
+ */
+function applyCitationLinks(content: string, citations?: Record<string, CitationChipData>) {
+  if (!citations) return content;
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  let inFence = false;
+  return lines
+    .map((line) => {
+      if (/^\s*(`{3,}|~{3,})/.test(line)) {
+        inFence = !inFence;
+        return line;
+      }
+      if (inFence) return line;
+      return line.replace(/\[§(\d+)\]/g, (marker, n: string) =>
+        citations[`§${n}`] ? `[§${n}](cite://${n})` : marker,
+      );
+    })
+    .join("\n");
 }

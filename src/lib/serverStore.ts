@@ -586,25 +586,34 @@ export async function saveServerAnnotation(annotation: Annotation, request?: Req
   return nextAnnotation;
 }
 
-export async function listServerAnnotations(chapterId: string, request?: Request) {
+export async function listServerAnnotations(
+  filters: { chapterId?: string; courseId?: string },
+  request?: Request,
+) {
   const userId = await resolveUserId(request);
   const supabase = createSupabaseServiceClient();
 
   if (supabase && isUuid(userId)) {
-    const { data, error } = await supabase
+    let query = supabase
       .from("annotations")
       .select("payload, created_at")
-      .eq("chapter_id", chapterId)
-      .eq("user_id", userId)
-      .order("created_at", { ascending: true });
+      .eq("user_id", userId);
+    if (filters.chapterId) query = query.eq("chapter_id", filters.chapterId);
+    if (filters.courseId) query = query.eq("course_id", filters.courseId);
+    query = query.order("created_at", { ascending: true });
 
+    const { data, error } = await query;
     assertSupabaseNoError("List annotations", error);
     return (data ?? []).map((row) => row.payload as Annotation);
   }
 
   await hydrateLocalStore();
   return [...localAnnotations.values()]
-    .filter((annotation) => annotation.chapterId === chapterId && (!annotation.userId || annotation.userId === userId))
+    .filter((annotation) => {
+      if (filters.chapterId && annotation.chapterId !== filters.chapterId) return false;
+      if (filters.courseId && annotation.courseId !== filters.courseId) return false;
+      return !annotation.userId || annotation.userId === userId;
+    })
     .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
 }
 

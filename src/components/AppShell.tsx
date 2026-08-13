@@ -12,11 +12,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   if (isBare) return <>{children}</>;
 
+  // The reader page renders its own full-viewport chrome (and Navigation itself
+  // returns null on /chapters/), so skip the global nav + its pt-14 offset there —
+  // otherwise the chapter's h-screen layout gets pushed down 56px and leaves a
+  // scrollable blank gap above the reader header.
+  const isChapter = pathname?.includes("/chapters/");
+  const showChrome = !isAdmin && !isChapter;
+
   return (
     <>
-      {!isAdmin && <Navigation />}
-      <div className={isAdmin ? "" : "pt-14"}>
-        {!isAdmin && <ModelConfigWarning />}
+      {showChrome && <Navigation />}
+      <div className={showChrome ? "pt-14" : ""}>
+        {showChrome && <ModelConfigWarning />}
         {children}
       </div>
     </>

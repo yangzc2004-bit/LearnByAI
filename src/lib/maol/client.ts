@@ -66,7 +66,7 @@ const REPAIR_CHUNK_MAX_CHARS = 2_400;
 const REPAIR_CHUNK_MAX_TOKENS = 4_096;
 const REPAIR_CHUNK_TIMEOUT_MS = 45_000;
 const REPAIR_CHUNK_CONCURRENCY = 2;
-const TUTOR_TIMEOUT_MS = 60_000;
+const TUTOR_TIMEOUT_MS = 120_000;
 const TUTOR_REPAIR_TIMEOUT_MS = 60_000;
 const MAX_LONG_TEXT_REPAIR_ATTEMPTS = 3;
 const MAX_REVIEW_REPAIR_ATTEMPTS = 3;
@@ -1142,15 +1142,21 @@ export async function askTutor(input: {
   });
 
   try {
+    const compact = compactTutorHistory(input.history ?? []);
     const answer = await dispatchAgentText({
       agent: "TUTOR",
       jobId: job.id,
       prompt: buildAnnotationTutorPrompt({
         ...input,
-        history: compactTutorHistory(input.history ?? []),
+        history: compact.messages,
+        historyNote: compact.truncated ? "（早期对话已省略，仅保留最近 8 条）" : undefined,
       }),
       temperature: 0.3,
-      maxTokens: 2048,
+      // No hardcoded budget: follow TUTOR_MAX_TOKENS → AI_MAX_TOKENS (default 32768)
+      // via the dispatcher config chain, and let output-limit continuation make the
+      // ceiling elastic instead of a truncation cliff.
+      continueOnOutputLimit: true,
+      maxContinuationSegments: 2,
       timeoutMs: TUTOR_TIMEOUT_MS,
       maxAttempts: 1,
       stream: true,
@@ -1251,13 +1257,15 @@ function normalizeRepairSuggestion(
 }
 
 function compactTutorHistory(history: { role: "user" | "assistant"; content: string }[]) {
-  return history
+  const truncated = history.length > 8;
+  const messages = history
     .slice(-8)
     .map((message) => ({
       role: message.role,
       content: message.content.replace(/\s+/g, " ").trim().slice(0, 1200),
     }))
     .filter((message) => message.content);
+  return { messages, truncated };
 }
 
 export async function planCourseOutline(

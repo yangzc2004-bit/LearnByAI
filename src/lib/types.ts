@@ -311,10 +311,18 @@ export type UsageEvent = {
   createdAt: string;
 };
 
+export type Citation = {
+  sectionId: string;
+  /** Display label, e.g. "§3", matching the chapter section map. */
+  label: string;
+};
+
 export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** Grounded textbook references for assistant messages. */
+  citations?: Citation[];
 };
 
 export type AnnotationScope = "anchored" | "chapter";

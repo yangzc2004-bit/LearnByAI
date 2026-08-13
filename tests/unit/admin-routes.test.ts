@@ -77,6 +77,7 @@ test("admin pages hide the public navigation shell for admin routes", () => {
 
   assert.match(layout, /<AppShell>\{children\}<\/AppShell>/u);
   assert.match(shell, /pathname.*startsWith\("\/admin\/"\)/u);
-  assert.match(shell, /!\s*isAdmin && <Navigation/u);
-  assert.match(shell, /isAdmin \? "" : "pt-14"/u);
+  assert.match(shell, /const showChrome = !isAdmin && !isChapter/u);
+  assert.match(shell, /showChrome && <Navigation/u);
+  assert.match(shell, /showChrome \? "pt-14" : ""/u);
 });

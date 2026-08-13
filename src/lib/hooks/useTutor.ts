@@ -1,13 +1,13 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch } from "@/lib/clientApi";
 import { randomId } from "@/lib/clientId";
 import { publicSafeErrorMessage } from "@/lib/publicSafeError";
 import { createSseParser } from "@/lib/sse";
 import { Annotation, Course } from "@/lib/types";
 
-export const TUTOR_REQUEST_TIMEOUT_MS = 70_000;
+export const TUTOR_REQUEST_TIMEOUT_MS = 130_000;
 
 export type TutorTarget =
   | { scope: "anchored"; selectedText: string; sectionId?: string }
@@ -19,16 +19,41 @@ export function useTutor(course: Course | undefined, chapterId: string) {
   const [target, setTarget] = useState<TutorTarget>();
   const [answering, setAnswering] = useState(false);
   const [error, setError] = useState("");
+  const [historyScope, setHistoryScope] = useState<"chapter" | "course">("chapter");
   const controllerRef = useRef<AbortController | null>(null);
 
+  // Switching chapters must never leak the previous chapter's conversation or
+  // in-flight stream into the new chapter's panel.
+  useEffect(() => {
+    controllerRef.current?.abort();
+    setActive(undefined);
+    setTarget(undefined);
+    setError("");
+  }, [chapterId]);
+
   const reloadAnnotations = useCallback(() => {
-    apiFetch(`/api/annotations?chapterId=${chapterId}`)
+    const scopeParam = historyScope === "course" && course?.id
+      ? `courseId=${course.id}`
+      : `chapterId=${chapterId}`;
+    apiFetch(`/api/annotations?${scopeParam}`)
       .then((response) => (response.ok ? response.json() : undefined))
       .then((data) => {
         if (data?.annotations) setAnnotations(data.annotations);
       })
       .catch(() => undefined);
-  }, [chapterId]);
+  }, [chapterId, historyScope, course]);
+
+  // Refetch when the history scope toggles (skip the initial mount — the page
+  // already triggers the first load on chapter navigation).
+  const scopeInitialized = useRef(false);
+  useEffect(() => {
+    if (!scopeInitialized.current) {
+      scopeInitialized.current = true;
+      return;
+    }
+    reloadAnnotations();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyScope]);
 
   const startAnchored = useCallback((selectedText: string, sectionId?: string) => {
     setTarget({ scope: "anchored", selectedText, sectionId });
@@ -39,6 +64,16 @@ export function useTutor(course: Course | undefined, chapterId: string) {
   const startGeneral = useCallback(() => {
     setTarget({ scope: "chapter" });
     setActive(undefined);
+    setError("");
+  }, []);
+
+  // Attach a newly selected passage to the CURRENT thread (keeping its history)
+  // instead of discarding it for a brand-new conversation.
+  const continueAnchored = useCallback((selectedText: string, sectionId?: string) => {
+    setActive((current) => current
+      ? { ...cloneAnnotation(current), selectedText, sectionId, scope: "anchored" }
+      : current);
+    setTarget({ scope: "anchored", selectedText, sectionId });
     setError("");
   }, []);
 
@@ -75,7 +110,12 @@ export function useTutor(course: Course | undefined, chapterId: string) {
           topic: course.topic,
           selectedText: annotation.selectedText ?? "",
           question,
-          history: annotation.messages.filter((message) => message.id !== pendingId),
+          // Exclude the just-appended user question from history — it travels in
+          // `question` alone, so the prompt never sees the current question twice.
+          history: annotation.messages
+            .filter((message) => message.id !== pendingId)
+            .slice(0, -1)
+            .map(({ role, content }) => ({ role, content })),
           sectionId: annotation.sectionId,
           annotation,
           signal: controller.signal,
@@ -89,7 +129,9 @@ export function useTutor(course: Course | undefined, chapterId: string) {
           ? "导师回答已停止。"
           : publicSafeErrorMessage(error, "导师暂时无法回答，请稍后重试。");
         setError(controller.signal.aborted ? "" : message);
-        draft = updateMessageContent(draft, pendingId, () => message);
+        // Append the interruption notice instead of replacing the tokens already
+        // streamed, so a partial answer is never silently discarded.
+        draft = updateMessageContent(draft, pendingId, (content) => (content ? `${content}\n\n${message}` : message));
         setActive(draft);
       } finally {
         window.clearTimeout(timeout);
@@ -173,9 +215,12 @@ export function useTutor(course: Course | undefined, chapterId: string) {
     target,
     answering,
     error,
+    historyScope,
+    setHistoryScope,
     reloadAnnotations,
     startAnchored,
     startGeneral,
+    continueAnchored,
     openThread,
     clear,
     ask,
@@ -252,14 +297,17 @@ async function askTutorStreaming(input: {
 
   const decoder = new TextDecoder("utf-8");
   let saved: Annotation | undefined;
+  let receivedTerminalEvent = false;
   const parser = createSseParser((event) => {
     if (!event.data) return;
     const parsed = JSON.parse(event.data);
     if (event.event === "token") {
       input.onToken(parsed.text ?? "");
     } else if (event.event === "done") {
+      receivedTerminalEvent = true;
       saved = parsed.annotation ?? undefined;
     } else if (event.event === "error") {
+      receivedTerminalEvent = true;
       throw new Error(parsed.error ?? "Tutor request failed.");
     }
   });
@@ -272,5 +320,10 @@ async function askTutorStreaming(input: {
 
   parser.feed(decoder.decode());
   parser.flush();
+  // A stream that ends without `done`/`error` (dropped connection, killed server)
+  // must surface as an error instead of silently keeping a truncated answer.
+  if (!receivedTerminalEvent) {
+    throw new Error("Tutor stream ended before completion.");
+  }
   return saved;
 }

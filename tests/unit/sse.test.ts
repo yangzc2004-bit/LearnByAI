@@ -58,7 +58,7 @@ test("reader page subscribes to course SSE snapshots", () => {
 test("tutor hook uses authenticated abortable streaming requests", () => {
   const src = readFileSync("src/lib/hooks/useTutor.ts", "utf8");
 
-  assert.match(src, /TUTOR_REQUEST_TIMEOUT_MS = 70_000/u);
+  assert.match(src, /TUTOR_REQUEST_TIMEOUT_MS = 130_000/u);
   assert.match(src, /new AbortController\(\)/u);
   assert.match(src, /apiFetch\("\/api\/annotations"/u);
   assert.doesNotMatch(src, /fetch\("\/api\/annotations"/u);
@@ -135,11 +135,12 @@ test("annotations route bounds tutor streaming requests with friendly SSE errors
   const routeSource = readFileSync("src/app/api/annotations/route.ts", "utf8");
 
   assert.match(routeSource, /export const dynamic = "force-dynamic"/u);
-  assert.match(routeSource, /TUTOR_ROUTE_TIMEOUT_MS = 65_000/u);
+  assert.match(routeSource, /TUTOR_ROUTE_TIMEOUT_MS = 125_000/u);
   assert.match(routeSource, /function withDeadline/u);
   assert.match(routeSource, /function tutorErrorMessage/u);
   assert.match(routeSource, /withDeadline\(withQuotaConsumption\(userId, "ask_tutor"/u);
-  assert.match(routeSource, /enqueue\("error", JSON\.stringify\(\{\s+error: tutorErrorMessage\(error\),/u);
+  assert.match(routeSource, /enqueue\("error", JSON\.stringify\(\{\s*error: message/u);
+  assert.match(routeSource, /persistFailedAnnotation/u);
   assert.match(routeSource, /controller\.close\(\)/u);
   assert.match(routeSource, /"Cache-Control": "no-cache, no-transform"/u);
   assert.match(routeSource, /"X-Accel-Buffering": "no"/u);

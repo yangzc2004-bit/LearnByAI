@@ -99,10 +99,10 @@ test("annotation can be saved, listed, and deleted", async () => {
   };
 
   await store.saveServerAnnotation(annotation);
-  assert.equal((await store.listServerAnnotations(chapterId)).length, 1);
+  assert.equal((await store.listServerAnnotations({ chapterId })).length, 1);
 
   await store.deleteServerAnnotation(annotation.id);
-  assert.equal((await store.listServerAnnotations(chapterId)).length, 0);
+  assert.equal((await store.listServerAnnotations({ chapterId })).length, 0);
 });
 
 test("chapter-scope annotation persists without selectedText (泛问 contract)", async () => {
@@ -120,7 +120,7 @@ test("chapter-scope annotation persists without selectedText (泛问 contract)",
   const saved = await store.saveServerAnnotation(annotation);
   assert.equal(saved.selectedText, undefined);
 
-  const list = await store.listServerAnnotations(chapterId);
+  const list = await store.listServerAnnotations({ chapterId });
   assert.equal(list.length, 1);
   assert.equal(list[0].scope, "chapter");
   assert.equal(list[0].title, "整章泛问");
