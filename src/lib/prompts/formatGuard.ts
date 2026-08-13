@@ -7,12 +7,18 @@ export function preRepairMarkdown(content: string) {
   const normalized = normalizeLooseOrderedLists(
     replaceLegacyImageLinksWithFigurePlaceholders(
       escapePipesInTableMath(
-        wrapBareMathParagraphs(
-          repairMarkdownFences(
-            wrapBareInlineLatexFragments(
-              normalizeMath(
-                normalizeTextbookCallouts(
-                  normalizeInlineFenceBoundaries(repairedImageSyntax),
+        wrapResidualBareInlineLatexFragments(
+          wrapBareMathParagraphs(
+            repairMarkdownFences(
+              wrapBareInlineLatexFragments(
+                removeOrphanDisplayMathDelimiters(
+                  normalizeMath(
+                    removeOrphanDisplayMathDelimiters(
+                      normalizeTextbookCallouts(
+                        normalizeInlineFenceBoundaries(repairedImageSyntax),
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -30,6 +36,85 @@ export function preRepairMarkdown(content: string) {
     // result is stable under a second pass (the renderer runs this again).
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/**
+ * Some historical writer outputs put an empty pair of `$$` directly before or
+ * after every real display block:
+ *
+ *   $$
+ *   $$
+ *   \frac{...}{...}
+ *   $$
+ *   $$
+ *
+ * Markdown then treats the later pairs as independent empty blocks, and any
+ * stateful math repair can mistake following prose for formula content. Remove
+ * only consecutive duplicate delimiters; a deliberately adjacent pair of
+ * display formulas still keeps one closing and one opening delimiter.
+ */
+function removeOrphanDisplayMathDelimiters(content: string) {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const output: string[] = [];
+  let inDisplayMath = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (line.trim() !== "$$") {
+      output.push(line);
+      continue;
+    }
+
+    if (!inDisplayMath && isClearlyOrphanClosingDisplayDelimiter(lines, index)) {
+      continue;
+    }
+
+    if (inDisplayMath) {
+      output.push("$$");
+      inDisplayMath = false;
+      continue;
+    }
+
+    const next = nextNonEmptyLine(lines, index + 1);
+    if (next && looksLikeDisplayMathStart(next)) {
+      output.push("$$");
+      inDisplayMath = true;
+    }
+    // Otherwise it is an unmatched closing delimiter. Dropping it keeps
+    // subsequent prose out of a false display-math zone.
+  }
+
+  return output.join("\n");
+}
+
+function nextNonEmptyLine(lines: string[], start: number) {
+  for (let index = start; index < lines.length; index += 1) {
+    const trimmed = lines[index]?.trim() ?? "";
+    if (trimmed) return trimmed;
+  }
+  return "";
+}
+
+function previousNonDelimiterLine(lines: string[], start: number) {
+  for (let index = start; index >= 0; index -= 1) {
+    const trimmed = lines[index]?.trim() ?? "";
+    if (trimmed && trimmed !== "$$") return trimmed;
+  }
+  return "";
+}
+
+function isClearlyOrphanClosingDisplayDelimiter(lines: string[], index: number) {
+  const previous = previousNonDelimiterLine(lines, index - 1);
+  const next = nextNonEmptyLine(lines, index + 1);
+  return Boolean(previous && next && looksLikeDisplayMathStart(previous) && !looksLikeDisplayMathStart(next));
+}
+
+function looksLikeDisplayMathStart(value: string) {
+  if (value === "$$") return false;
+  if (/^\\(?:begin|frac|dfrac|tfrac|sum|prod|int|sqrt|left|right|mathbf|mathbb|mathcal|operatorname|det|log|ln|partial|nabla)\b/u.test(value)) {
+    return true;
+  }
+  return /[=<>≈≤≥]|\\[A-Za-z]+|[_^{}]/u.test(value) && !/[一-鿿]/u.test(value);
 }
 
 /**
@@ -186,6 +271,7 @@ function wrapBareInlineLatexInLine(line: string) {
     if (
       char !== "\\" ||
       line[index - 1] === "\\" ||
+      hasUnwrappedLatexPrefix(output) ||
       !hasBareInlineLatexStartBoundary(line, index) ||
       !isStrongLatexCommandAt(line, index)
     ) {
@@ -194,11 +280,10 @@ function wrapBareInlineLatexInLine(line: string) {
       continue;
     }
 
-    const end = findBareInlineLatexEnd(line, index);
-    const candidate = line.slice(index, end).trim();
-    if (candidate && isLikelyBareInlineLatex(candidate) && canRenderMath(candidate, false)) {
-      output += `$${candidate}$`;
-      index = end;
+    const candidate = findRenderableBareInlineLatex(line, index, findBareInlineLatexEnd(line, index));
+    if (candidate) {
+      output += `$${candidate.value}$`;
+      index = candidate.end;
       continue;
     }
 
@@ -207,6 +292,74 @@ function wrapBareInlineLatexInLine(line: string) {
   }
 
   return output;
+}
+
+function wrapResidualBareInlineLatexFragments(content: string) {
+  return transformOutsideFences(content, (text) => {
+    const lines = text.split("\n");
+    let inDisplayMath = false;
+
+    return lines
+      .map((line) => {
+        if (line.trim() === "$$") {
+          inDisplayMath = !inDisplayMath;
+          return line;
+        }
+        return inDisplayMath ? line : wrapResidualBareInlineLatex(line);
+      })
+      .join("\n");
+  });
+}
+
+function wrapResidualBareInlineLatex(line: string) {
+  // sanitizeMathDelimiters has dedicated recovery for one-sided escaped dollar
+  // delimiters. Do not let this late pass split that incomplete math first.
+  if (line.includes("\\$")) return line;
+
+  let output = "";
+  let index = 0;
+
+  while (index < line.length) {
+    const char = line[index]!;
+    if (char === "$" && line[index - 1] !== "\\") {
+      const closing = findInlineMathClosingDollar(line, index + 1);
+      if (closing >= 0) {
+        output += line.slice(index, closing + 1);
+        index = closing + 1;
+        continue;
+      }
+    }
+
+    if (
+      char !== "\\" ||
+      line[index - 1] === "\\" ||
+      !hasResidualBareInlineLatexStartBoundary(line, index) ||
+      !isStrongLatexCommandAt(line, index)
+    ) {
+      output += char;
+      index += 1;
+      continue;
+    }
+
+    const start = findResidualMathPrefixStart(line, index);
+    const candidate = findRenderableBareInlineLatex(line, start, findBareInlineLatexEnd(line, index));
+    if (candidate) {
+      output = output.slice(0, Math.max(0, output.length - (index - start)));
+      output += `$${candidate.value}$`;
+      index = candidate.end;
+      continue;
+    }
+
+    output += char;
+    index += 1;
+  }
+
+  return output;
+}
+
+function hasUnwrappedLatexPrefix(value: string) {
+  const outsideMath = value.replace(/(?<!\\)\$[^\n$]*?(?<!\\)\$/gu, "");
+  return /\\[A-Za-z]+/u.test(outsideMath);
 }
 
 function findInlineMathClosingDollar(value: string, start: number) {
@@ -225,15 +378,36 @@ function hasBareInlineLatexStartBoundary(value: string, index: number) {
   );
 }
 
+function hasResidualBareInlineLatexStartBoundary(value: string, index: number) {
+  const previous = value[index - 1];
+  return (
+    previous === undefined ||
+    /[\s\p{P}\p{S}]/u.test(previous) ||
+    /[\u4e00-\u9fff]/u.test(previous) ||
+    isShortMathPrefixBeforeCommand(value, index)
+  );
+}
+
+function isShortMathPrefixBeforeCommand(value: string, index: number) {
+  let start = index;
+  while (start > 0 && /[A-Za-z0-9_./^+\-]/u.test(value[start - 1]!)) start -= 1;
+  const prefix = value.slice(start, index);
+  return (
+    /^[A-Z]$/u.test(prefix) ||
+    /^[a-z](?:[a-z]?\/[a-z]?)?$/u.test(prefix) ||
+    /^-?(?:\d+(?:\.\d*)?|\.\d+)$/u.test(prefix)
+  );
+}
+
 function isStrongLatexCommandAt(value: string, index: number) {
   const command = value.slice(index).match(
-    /^\\(?:alpha|beta|gamma|theta|lambda|sigma|mu|pi|rho|tau|phi|psi|omega|delta|epsilon|varepsilon|eta|kappa|xi|zeta|frac|dfrac|tfrac|sqrt|sum|prod|int|partial|nabla|mathbf|mathbb|mathcal|mathrm|operatorname|text|hat|bar|vec|dot|ddot|left|right|begin|end|quad|qquad|cdot|times|le|leq|ge|geq|ne|neq|approx|sim|pm|mp|infty|ldots|dots|det|log|ln|exp)(?![A-Za-z])/u,
+    /^\\(?:alpha|beta|gamma|theta|lambda|sigma|mu|pi|rho|tau|phi|psi|omega|delta|epsilon|varepsilon|eta|kappa|xi|zeta|Alpha|Beta|Gamma|Theta|Lambda|Sigma|Phi|Psi|Omega|Delta|Pi|Tau|Xi|Eta|Rho|Mu|Nu|Kappa|Zeta|frac|dfrac|tfrac|sqrt|sum|prod|int|partial|nabla|mathbf|mathbb|mathcal|mathrm|operatorname|text|hat|bar|vec|dot|ddot|left|right|begin|end|quad|qquad|cdot|times|le|leq|ge|geq|ne|neq|approx|sim|pm|mp|infty|ldots|dots|det|log|ln|exp|in|to|mapsto|forall|exists|cdots|ldotp|Pr)(?![A-Za-z])/u,
   );
   return Boolean(command);
 }
 
 function isLikelyBareInlineLatex(value: string) {
-  return /^\\[A-Za-z]+/u.test(value) && !/[\n$]/u.test(value) && value.length <= 220;
+  return /\\[A-Za-z]+/u.test(value) && !/[\n$]/u.test(value) && value.length <= 220;
 }
 
 function findBareInlineLatexEnd(value: string, start: number) {
@@ -264,6 +438,39 @@ function findBareInlineLatexEnd(value: string, start: number) {
   }
 
   return index;
+}
+
+function findResidualMathPrefixStart(value: string, commandStart: number) {
+  let start = commandStart;
+  while (start > 0 && /[A-Za-z0-9_\\^=<>+\-*/|()[\],.;:!?'"]/u.test(value[start - 1]!)) {
+    start -= 1;
+  }
+  return start;
+}
+
+function findRenderableBareInlineLatex(value: string, start: number, maxEnd: number) {
+  const full = value.slice(start, maxEnd).trimEnd();
+  if (isLikelyBareInlineLatex(full) && canRenderMath(full, false)) {
+    return { value: full, end: start + full.length };
+  }
+
+  // A prose parenthesis or punctuation mark can be swallowed by the optimistic
+  // scan above. Search backwards for the longest complete piece KaTeX accepts,
+  // rather than giving up and leaking a literal command into the reader.
+  for (let end = start + full.length - 1; end > start; end -= 1) {
+    const candidate = value.slice(start, end).trimEnd();
+    if (
+      !candidate ||
+      !/[A-Za-z0-9})\]]$/u.test(candidate) ||
+      !isLikelyBareInlineLatex(candidate) ||
+      !canRenderMath(candidate, false)
+    ) {
+      continue;
+    }
+    return { value: candidate, end: start + candidate.length };
+  }
+
+  return undefined;
 }
 
 /**

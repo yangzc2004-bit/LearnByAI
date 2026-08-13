@@ -32,6 +32,25 @@ test("wraps a bare command-led expression next to Chinese punctuation", () => {
   assert.equal(postRepairMarkdown(out), out);
 });
 
+test("wraps several bare inline fragments separated by CJK punctuation", () => {
+  const input = String.raw`线性部分（\mathbf{r} + A\mathbf{x}）与约束项 \alpha_{12} < 0 共同决定 \mathbf{x}(t) 的变化。`;
+  const out = postRepairMarkdown(input);
+  assert.ok(out.includes(String.raw`$\mathbf{r} + A\mathbf{x}$`), out);
+  assert.match(out, /\$\\alpha_\{12\} < 0\$/u, out);
+  assert.match(out, /\$\\mathbf\{x\}\(t\)\$/u, out);
+  assert.ok(!validateFormat(out).some((issue) => issue.check === "format.bare_latex"), JSON.stringify(validateFormat(out)));
+  assert.equal(postRepairMarkdown(out), out);
+});
+
+test("wraps bare LaTeX with a short mathematical prefix", () => {
+  const input = String.raw`消去 d\tau 后，特征值为 -\alpha，导数写作 D\Phi。`;
+  const out = postRepairMarkdown(input);
+  assert.ok(out.includes(String.raw`$d\tau$`), out);
+  assert.ok(out.includes(String.raw`$-\alpha$`), out);
+  assert.ok(out.includes(String.raw`$D\Phi$`), out);
+  assert.ok(!validateFormat(out).some((issue) => issue.check === "format.bare_latex"), JSON.stringify(validateFormat(out)));
+});
+
 test("tightens spaced inline math so remark-math can render it", () => {
   // "$ x $" is NOT recognized by remark-math (space after opening / before closing)
   // and would leak as a literal "$". Must become "$x$".
@@ -66,6 +85,38 @@ test("removes nested single-dollar delimiters inside display math", () => {
   assert.equal(out, "$$\n\\Omega=\\{s_0,s_1\\}\n$$");
   assert.equal(postRepairMarkdown(out), out);
   assert.ok(!validateFormat(out).some((issue) => issue.check === "format.lonely_dollar"), JSON.stringify(validateFormat(out)));
+});
+
+test("collapses historical duplicate display delimiters before healing prose", () => {
+  const input = [
+    "$$",
+    "$$",
+    String.raw`\frac{dx}{dt} = rx`,
+    "$$",
+    "$$",
+    "",
+    String.raw`逐元素解读：\alpha_{11} = -0.1 表示自限制。`,
+  ].join("\n");
+  const out = postRepairMarkdown(input);
+  assert.equal((out.match(/^\$\$$/gmu) ?? []).length, 2, out);
+  assert.match(out, /\$\\alpha_\{11\} = -0\.1\$/u, out);
+  assert.ok(!validateFormat(out).some((issue) => issue.severity === "error"), JSON.stringify(validateFormat(out)));
+  assert.equal(postRepairMarkdown(out), out);
+});
+
+test("drops an orphan display delimiter after an otherwise complete formula", () => {
+  const input = [
+    "$$",
+    String.raw`\frac{dx}{dt} = rx`,
+    "$$",
+    "$$",
+    "",
+    String.raw`逐元素解读：\alpha_{11} = -0.1 表示自限制。`,
+  ].join("\n");
+  const out = postRepairMarkdown(input);
+  assert.equal((out.match(/^\$\$$/gmu) ?? []).length, 2, out);
+  assert.match(out, /\$\\alpha_\{11\} = -0\.1\$/u, out);
+  assert.ok(!validateFormat(out).some((issue) => issue.severity === "error"), JSON.stringify(validateFormat(out)));
 });
 
 test("removes leaked dollar delimiters from display math body", () => {
