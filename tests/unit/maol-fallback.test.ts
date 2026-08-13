@@ -47,7 +47,9 @@ test("real provider calls are bounded by configurable request timeouts and think
   assert.match(aiSource, /reader\.cancel\(\)/u);
   assert.match(aiSource, /thinkingPayload\(config\.model,\s*config\.thinking\)/u);
   assert.match(aiSource, /thinking: \{ type: "enabled" \}/u);
-  assert.match(aiSource, /thinking !== "enabled"/u);
+  assert.match(aiSource, /thinking: \{ type: "disabled" \}/u);
+  assert.match(aiSource, /thinking === "disabled" && isDeepSeekModel\(model\)/u);
+  assert.match(aiSource, /function isDeepSeekModel/u);
   assert.match(aiSource, /isKimiThinkingModel\(model\)/u);
   assert.match(aiSource, /isKimiK27CodeModel\(model\)\) return 1/u);
   assert.match(aiSource, /isKimiThinkingModel\(model\) && thinking !== "auto"\) return 0\.6/u);

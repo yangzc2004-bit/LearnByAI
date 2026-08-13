@@ -113,7 +113,6 @@ async function generateValidatedHarnessStage(input: {
       prompt,
       temperature: 0.45,
       maxTokens: input.maxTokens,
-      maxAttempts: 1,
       continueOnOutputLimit: true,
       maxContinuationSegments: 3,
       continuationUsePreviousResponseId: false,

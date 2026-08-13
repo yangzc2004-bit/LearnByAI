@@ -1025,8 +1025,11 @@ function emptyCompletionError(model: string, kind: "stream" | "response" | "non-
 }
 
 function thinkingPayload(model: string, thinking: "disabled" | "enabled" | "auto") {
-  if (thinking !== "enabled") return {};
-  return { thinking: { type: "enabled" } };
+  if (thinking === "enabled") return { thinking: { type: "enabled" } };
+  if (thinking === "disabled" && isDeepSeekModel(model)) {
+    return { thinking: { type: "disabled" } };
+  }
+  return {};
 }
 
 function isKimiK27CodeModel(model: string) {
@@ -1035,6 +1038,10 @@ function isKimiK27CodeModel(model: string) {
 
 function isKimiThinkingModel(model: string) {
   return /^kimi-k/i.test(model.trim().toLowerCase());
+}
+
+function isDeepSeekModel(model: string) {
+  return /^deepseek(?:[-_.]|$)/i.test(model.trim());
 }
 
 function logModelRequest(input: {
