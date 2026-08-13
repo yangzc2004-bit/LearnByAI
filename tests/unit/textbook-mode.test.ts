@@ -11,8 +11,9 @@ import { normalizeContentMode, normalizeCourse } from "../../src/lib/normalizeCo
 import { hasImageModelConfig, normalizeModelOverrides } from "../../src/lib/modelOverrides";
 import { getUserImageModelConfig } from "../../src/lib/illustration";
 import { markdownToTex, toTex } from "../../src/lib/exports";
+import { markdownToSections } from "../../src/lib/maol/integrator";
 import { normalizeTextbookMeta, validateTextbookMeta } from "../../src/lib/textbookOutline";
-import type { Course, TextbookMeta, TextbookOutlineChapter } from "../../src/lib/types";
+import type { Chapter, Course, TextbookMeta, TextbookOutlineChapter } from "../../src/lib/types";
 
 // ---- contentMode compatibility -------------------------------------------
 
@@ -467,4 +468,57 @@ test("validateTextbookMeta rejects missing fixed roles / empty sections", () => 
   const tooFew = validMeta();
   tooFew.outline!.chapters = tooFew.outline!.chapters.slice(0, 2);
   assert.notEqual(validateTextbookMeta(tooFew), "");
+});
+
+// ---- section title numbering ---------------------------------------------
+
+test("markdownToSections strips writer-inserted section numbers from titles", () => {
+  const chapter: Chapter = {
+    id: "ch-1",
+    title: "种群动态模型",
+    description: "d",
+    time: { readingMinutes: 0, exerciseMinutes: 0, practiceMinutes: 0, extensionMinutes: 0 },
+  };
+  const content = [
+    "## 3.1 从生态学基础到动态方程：将种群变化转化为数学模型",
+    "",
+    "正文A。",
+    "",
+    "## 3.2 指数增长模型：连续与离散两种描述",
+    "",
+    "正文B。",
+    "",
+    "## 3.3、逻辑斯蒂增长与环境容纳量：密度制约与稳态",
+    "",
+    "正文C。",
+  ].join("\n");
+
+  const sections = markdownToSections(chapter, content);
+
+  assert.deepEqual(
+    sections.map((section) => section.title),
+    [
+      "从生态学基础到动态方程：将种群变化转化为数学模型",
+      "指数增长模型：连续与离散两种描述",
+      "逻辑斯蒂增长与环境容纳量：密度制约与稳态",
+    ],
+  );
+  assert.deepEqual(sections.map((section) => section.order), [0, 1, 2]);
+});
+
+test("markdownToSections keeps titles without a numeric prefix intact", () => {
+  const chapter: Chapter = {
+    id: "ch-2",
+    title: "引言",
+    description: "d",
+    time: { readingMinutes: 0, exerciseMinutes: 0, practiceMinutes: 0, extensionMinutes: 0 },
+  };
+  const content = "## 理论生态学要做什么\n\n正文。\n\n## 岛屿上的食草动物：一个最小示例\n\n正文。";
+
+  const sections = markdownToSections(chapter, content);
+
+  assert.deepEqual(
+    sections.map((section) => section.title),
+    ["理论生态学要做什么", "岛屿上的食草动物：一个最小示例"],
+  );
 });
