@@ -4,6 +4,7 @@ import {
   buildHarnessContractFingerprint,
   buildChapterHarnessStages,
   isMissingContextRefusal,
+  normalizeHarnessStageOutput,
   readValidHarnessCheckpoint,
 } from "../../src/lib/maol/chapterAuthorHarness";
 import { Chapter, ChapterHarnessCheckpoint, Course } from "../../src/lib/types";
@@ -114,6 +115,33 @@ test("chapter author harness rejects provider context-loss refusals", () => {
       "This section continues the population dynamics derivation from the completed stage.",
     ),
     false,
+  );
+});
+
+test("chapter author harness removes only a duplicated leading chapter heading from later stages", () => {
+  assert.equal(
+    normalizeHarnessStageOutput(
+      "# 第二章：种群动态模型\n\n## 2.4 密度制约\n\n正文。",
+      "第二章：种群动态模型",
+      3,
+    ),
+    "## 2.4 密度制约\n\n正文。",
+  );
+  assert.equal(
+    normalizeHarnessStageOutput(
+      "## 2.4 密度制约\n\n正文。",
+      "第二章：种群动态模型",
+      3,
+    ),
+    "## 2.4 密度制约\n\n正文。",
+  );
+  assert.equal(
+    normalizeHarnessStageOutput(
+      "# 第二章：种群动态模型\n\n## 2.1 指数增长\n\n正文。",
+      "第二章：种群动态模型",
+      0,
+    ),
+    "# 第二章：种群动态模型\n\n## 2.1 指数增长\n\n正文。",
   );
 });
 

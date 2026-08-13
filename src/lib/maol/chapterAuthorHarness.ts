@@ -126,8 +126,13 @@ async function generateValidatedHarnessStage(input: {
         mock: () => mockHarnessStage(input.course, input.chapter, input.stage, input.stageIndex),
         onJobUpdate: input.options.onJobUpdate,
       });
-      validateHarnessStageOutput(input.stage, text, input.stageIndex);
-      return text;
+      const normalized = normalizeHarnessStageOutput(
+        text,
+        expectedChapterHeading(input.course, input.chapter),
+        input.stageIndex,
+      );
+      validateHarnessStageOutput(input.stage, normalized, input.stageIndex);
+      return normalized;
     } catch (error) {
       validationError = error;
     }
@@ -264,6 +269,25 @@ function validateHarnessContinuation(text: string) {
   if (isMissingContextRefusal(text)) {
     throw new Error("AUTHOR Responses continuation lost the chapter harness context.");
   }
+}
+
+export function normalizeHarnessStageOutput(
+  text: string,
+  chapterHeading: string,
+  stageIndex: number,
+) {
+  if (stageIndex === 0) return text;
+
+  const lines = text.split("\n");
+  const firstContentIndex = lines.findIndex((line) => line.trim().length > 0);
+  if (firstContentIndex < 0) return text;
+
+  const expected = `# ${chapterHeading}`.trim();
+  if (lines[firstContentIndex]!.trim() !== expected) return text;
+
+  lines.splice(firstContentIndex, 1);
+  while (lines[firstContentIndex] === "") lines.splice(firstContentIndex, 1);
+  return lines.join("\n");
 }
 
 function validateHarnessStageOutput(stage: HarnessStage, text: string, stageIndex: number) {
