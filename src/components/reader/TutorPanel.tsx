@@ -1,9 +1,19 @@
 "use client";
 
-import { FormEvent, KeyboardEvent } from "react";
+import { FormEvent, KeyboardEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Bot, MessageSquareQuote, SendHorizontal, Trash2, User, X } from "lucide-react";
 import { MarkdownContent } from "@/components/MarkdownContent";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useTutor } from "@/lib/hooks/useTutor";
 import { Annotation } from "@/lib/types";
 
@@ -65,6 +75,19 @@ export function TutorPanel({
       return;
     }
     tutor.openThread(annotation);
+  }
+
+  const [threadToDelete, setThreadToDelete] = useState<Annotation>();
+  const [deletingThreadId, setDeletingThreadId] = useState("");
+
+  function confirmDeleteThread() {
+    const annotation = threadToDelete;
+    if (!annotation || deletingThreadId) return;
+    setDeletingThreadId(annotation.id);
+    void tutor.deleteThread(annotation.id).finally(() => {
+      setDeletingThreadId("");
+      setThreadToDelete(undefined);
+    });
   }
 
   return (
@@ -185,9 +208,10 @@ export function TutorPanel({
                       <div className="mt-0.5 font-mono text-[9px] text-muted-foreground/50">{formatTime(annotation.createdAt)}</div>
                     </button>
                     <button
-                      onClick={() => void tutor.deleteThread(annotation.id)}
+                      onClick={() => setThreadToDelete(annotation)}
                       className="mt-2 rounded p-1 text-muted-foreground/40 opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
                       title="删除对话"
+                      aria-label={`删除对话：${annotation.title || annotation.question || "（无标题）"}`}
                     >
                       <Trash2 size={12} />
                     </button>
@@ -241,6 +265,30 @@ export function TutorPanel({
           </button>
         </form>
       </div>
+
+      <AlertDialog open={Boolean(threadToDelete)} onOpenChange={(open) => !open && setThreadToDelete(undefined)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除这条对话？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将删除「{threadToDelete?.title || threadToDelete?.question || "（无标题）"}」的整段对话记录。这个操作不能撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={Boolean(deletingThreadId)}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={Boolean(deletingThreadId)}
+              onClick={(event) => {
+                event.preventDefault();
+                confirmDeleteThread();
+              }}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              {deletingThreadId ? "删除中..." : "确认删除"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </aside>
   );
 }
