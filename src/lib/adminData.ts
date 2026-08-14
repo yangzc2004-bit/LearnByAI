@@ -1226,6 +1226,8 @@ export async function enqueueAdminChapterGeneration(courseId: string, chapterId:
     sections: undefined,
     review: undefined,
     qualityReport: undefined,
+    // Chapter regeneration invalidates the condensed lecture.
+    lecture: undefined,
     status: "queued",
     generationJobId: job.id,
   });

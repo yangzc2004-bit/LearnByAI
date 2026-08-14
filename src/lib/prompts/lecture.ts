@@ -18,7 +18,7 @@ import type {
 
 const MAX_OBJECTIVES = 4;
 const MIN_TEACH_BLOCKS = 2;
-const MAX_TEACH_BLOCKS = 6;
+const MAX_TEACH_BLOCKS = 10;
 const MIN_SELF_CHECK = 2;
 const MAX_SELF_CHECK = 4;
 const MIN_QUIZ = 3;
@@ -80,7 +80,7 @@ ${content}
 2. 术语与记号逐字沿用 Course Bible 术语表 / 记号表，禁止另起译名或换符号。
 3. 讲解口吻是"讲课"而不是"写书"：口语、直给、有引导（允许"注意了""这里有个常见的坑"），但概念表述必须准确。
 4. 总量控制在 15~20 分钟阅读量：所有 teach 块的 intuition + concept + example 合计约 3000~4500 个汉字；不要为凑字数重复正文。
-5. teach 块按章节正文的小节组织（3~6 个），每个块对应一章正文里的一个小节；anchorSection 必须从下面这份"本章真实小节编号"里选（若无编号可用就省略该字段）：
+5. teach 块按章节正文的小节组织（3~10 个），每个块对应一章正文里的一个小节；anchorSection 必须从下面这份"本章真实小节编号"里选（若无编号可用就省略该字段）：
 ${sectionNumbers.length ? sectionNumbers.map((n) => `- ${n}`).join("\n") : "（本章正文没有编号小节）"}
 6. 每个 teach 块必须包含：直觉切入（先讲"为什么"）、核心概念（准确、可复述）、1 个最小例子（正文中出现过的例子，简化但不失真）。
 7. 随堂自测 ${MIN_SELF_CHECK}~${MAX_SELF_CHECK} 道概念理解题，每题附 2~4 句的简短解释；小测 ${MIN_QUIZ}~${MAX_QUIZ} 道单选题，每题 ${MIN_QUIZ_OPTIONS}~${MAX_QUIZ_OPTIONS} 个选项、只有 1 个正确项，并解释为什么。

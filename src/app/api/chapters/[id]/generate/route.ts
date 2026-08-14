@@ -112,6 +112,9 @@ export async function POST(
       sections: undefined,
       review: undefined,
       qualityReport: undefined,
+      // The lecture condenses the previous chapter body — regeneration
+      // invalidates it, so drop it instead of serving a stale lesson.
+      lecture: undefined,
       status: "queued",
       generationJobId: persistedJob.id,
     },

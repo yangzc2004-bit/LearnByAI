@@ -157,6 +157,8 @@ async function enqueueRetryJob(job: GenerationJob, request: Request) {
               sections: undefined,
               review: undefined,
               qualityReport: undefined,
+              // Chapter regeneration invalidates the condensed lecture.
+              lecture: undefined,
               status: "queued",
               generationJobId: persistedJob.id,
             },
