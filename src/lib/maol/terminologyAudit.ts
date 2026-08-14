@@ -390,8 +390,15 @@ function isCjkVariant(value: string) {
 }
 
 /**
- * Pick the canonical spelling for each conflict: a Course Bible terminology
- * entry that matches a variant wins; otherwise the most frequent spelling.
+ * Pick the canonical spelling for each conflict, in strict order:
+ * Course Bible entry > body frequency > title frequency > no replacement.
+ *
+ * Title occurrences only break a body tie because a title spelling must
+ * never outweigh the body — "马尔科夫 once in a title, 马尔可夫 once in the
+ * body" resolves to the body form, not the title form. A full tie (equal
+ * body counts AND equal title counts) is deliberately conservative: no
+ * replacement is emitted at all instead of picking whichever spelling
+ * happens to sit first in the variants list.
  */
 export function chooseCanonicalReplacements(
   conflicts: Map<string, TerminologyConflict>,
@@ -419,27 +426,43 @@ export function chooseCanonicalReplacements(
     );
     const bibleForm = bibleMatch?.term;
 
-    const counts = distinct.map((variant) =>
-      chapterContents.reduce(
-        (sum, content, index) =>
-          sum +
-          occurrencesOutsideFences(content, variant) +
-          occurrencesInTitle(titleContents[index] ?? "", variant),
-        0,
-      ),
+    // Count body and title occurrences separately: the body vote decides,
+    // and the title vote only breaks a body tie (see the doc comment above).
+    const bodyCounts = distinct.map((variant) =>
+      chapterContents.reduce((sum, content) => sum + occurrencesOutsideFences(content, variant), 0),
     );
-    const canonical = bibleForm && distinct.includes(bibleForm)
-      ? bibleForm
-      : distinct[counts.indexOf(Math.max(...counts))] ?? distinct[0]!;
+    const titleCounts = distinct.map((variant) =>
+      titleContents.reduce((sum, title) => sum + occurrencesInTitle(title, variant), 0),
+    );
+
+    let canonical: string | undefined;
+    if (bibleForm && distinct.includes(bibleForm)) {
+      canonical = bibleForm;
+    } else {
+      const maxBody = Math.max(...bodyCounts);
+      const bodyLeaders = distinct.filter((_variant, index) => bodyCounts[index] === maxBody);
+      if (bodyLeaders.length === 1) {
+        canonical = bodyLeaders[0];
+      } else {
+        const maxTitle = Math.max(...bodyLeaders.map((variant) => titleCounts[distinct.indexOf(variant)] ?? 0));
+        const titleLeaders = bodyLeaders.filter(
+          (variant) => (titleCounts[distinct.indexOf(variant)] ?? 0) === maxTitle,
+        );
+        // Ambiguous evidence: deliberately conservative — no replacement.
+        canonical = titleLeaders.length === 1 ? titleLeaders[0] : undefined;
+      }
+    }
 
     resolved.push({ ...conflict, variants: distinct });
-    for (const variant of distinct) {
-      if (variant === canonical) continue;
-      if (!safePair(variant, canonical)) continue;
-      const key = `${variant}\u0000${canonical}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      replacements.push({ from: variant, to: canonical });
+    if (canonical) {
+      for (const variant of distinct) {
+        if (variant === canonical) continue;
+        if (!safePair(variant, canonical)) continue;
+        const key = `${variant}\u0000${canonical}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        replacements.push({ from: variant, to: canonical });
+      }
     }
   }
 

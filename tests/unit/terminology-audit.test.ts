@@ -192,6 +192,54 @@ test("Course Bible terminology overrides frequency when choosing the canonical f
   assert.deepEqual(replacements, [{ from: "回放缓冲区", to: "重放缓冲区" }]);
 });
 
+test("chooseCanonicalReplacements lets the body win a title-vs-body tie (马尔科夫/马尔可夫 regression)", () => {
+  // One body occurrence of 马尔可夫, one title occurrence of 马尔科夫. The
+  // variants are ordered title-first, exactly as the candidate generator
+  // produces them — the canonical choice must NOT depend on that order.
+  const conflicts = buildConflictMap(
+    [{ key: "a", variants: ["马尔科夫", "马尔可夫"] }],
+    ["正文只写马尔可夫。", ""],
+    ["", "马尔科夫决策过程"],
+  );
+  const { replacements } = chooseCanonicalReplacements(
+    conflicts,
+    ["正文只写马尔可夫。", ""],
+    [],
+    ["", "马尔科夫决策过程"],
+  );
+  assert.deepEqual(replacements, [{ from: "马尔科夫", to: "马尔可夫" }]);
+});
+
+test("chooseCanonicalReplacements uses the title count only to break a body tie", () => {
+  const conflicts = buildConflictMap(
+    [{ key: "a", variants: ["马尔可夫", "马尔科夫"] }],
+    ["马尔可夫 马尔科夫", ""],
+    ["", "马尔科夫决策过程"],
+  );
+  const { replacements } = chooseCanonicalReplacements(
+    conflicts,
+    ["马尔可夫 马尔科夫", ""],
+    [],
+    ["", "马尔科夫决策过程"],
+  );
+  assert.deepEqual(replacements, [{ from: "马尔可夫", to: "马尔科夫" }]);
+});
+
+test("chooseCanonicalReplacements stays conservative on a full body+title tie", () => {
+  const conflicts = buildConflictMap(
+    [{ key: "a", variants: ["马尔可夫", "马尔科夫"] }],
+    ["马尔可夫 马尔科夫", ""],
+  );
+  const { replacements, conflicts: resolved } = chooseCanonicalReplacements(
+    conflicts,
+    ["马尔可夫 马尔科夫", ""],
+    [],
+  );
+  assert.equal(resolved.length, 1, JSON.stringify(resolved));
+  assert.deepEqual(replacements, []);
+});
+
+
 test("applyTerminologyReplacements skips fenced code blocks", () => {
   const md = [
     "正文：马尔科夫链与马尔科夫性质。",

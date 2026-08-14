@@ -77,6 +77,16 @@ async function buildExportContent(
   if (format === "tex") {
     const tex = await toTex(course);
     const qa = qaGeneratedTex(tex);
+    // The "export must never silently pass defects" contract applies to the
+    // direct .tex download too: error-level findings (heading hash residue,
+    // math leaking into text mode, orphan sub-levels) are print defects that
+    // the user would compile into their own broken document. Warnings still
+    // pass through and are surfaced on the export job.
+    if (hasBlockingExportQaIssues(qa)) {
+      throw new ExportQaBlockError(
+        `导出质检发现阻断性问题，已阻止交付含缺陷的 TeX 源文件：\n${formatQaWarnings(qa).join("\n")}`,
+      );
+    }
     if (qa.length) {
       console.warn(`[exports] TeX QA found ${qa.length} issue(s) for course ${course.id}:`, qa.map((item) => item.message));
     }
@@ -221,6 +231,18 @@ async function renderTextbookPdf(course: Course, exportId: string) {
   const qa = qaGeneratedTex(tex);
   if (qa.length) {
     console.warn(`[exports] generated TeX QA found ${qa.length} issue(s) for course ${course.id}:`, qa.map((item) => `${item.check}: ${item.message}`));
+  }
+
+  // Blocking QA must gate BEFORE the first XeLaTeX invocation: error-level
+  // residue classes (math_in_text, unbalanced environments) commonly make the
+  // compile itself fail, and a compile failure would propagate as an ordinary
+  // TeXCompileError — the caller would then fall back to the HTML render and
+  // deliver the PDF with QA never getting a chance to block. Gate here, after
+  // main.tex is written and scanned, so the block always wins the race.
+  if (hasBlockingExportQaIssues(qa)) {
+    throw new ExportQaBlockError(
+      `导出质检发现阻断性问题，已阻止交付损坏的 PDF：\n${formatQaWarnings(qa).join("\n")}`,
+    );
   }
 
   try {
