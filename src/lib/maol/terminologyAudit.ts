@@ -69,6 +69,7 @@ export function buildTermExtractionPrompt(
 
 规则：
 - 只列真实出现在正文中的词，禁止编造。
+- 特别留意：同一概念在本章若有多种写法（如「马尔科夫」与「马尔可夫」、「同策略」与「在策略」），两种写法都要列出，这是本次提取的重点。
 - 按出现顺序列出，最多 ${MAX_TERMS_PER_CHAPTER} 个；重复出现的只列一次。
 - 术语表用于全书一致性检查，宁可多列不可漏列。
 - 只输出 JSON，第一个字符必须是 {，最后一个字符必须是 }。
@@ -227,6 +228,82 @@ export function parseConflictGroups(raw: string): { key: string; variants: strin
     groups.push({ key: distinct.join("\u0000"), variants: distinct, same, reason });
   }
   return groups;
+}
+
+/**
+ * Merge groups that share a variant (transitive closure): "多步回报/n步回报"
+ * + "n步回报/n步回溯" must become ONE group, otherwise the same spelling gets
+ * two contradictory replacement targets.
+ */
+export function mergeTransitiveGroups(
+  groups: { key: string; variants: string[] }[],
+): { key: string; variants: string[] }[] {
+  const union = new Map<string, string>();
+  const find = (value: string): string => {
+    const parent = union.get(value);
+    if (parent === undefined) {
+      union.set(value, value);
+      return value;
+    }
+    if (parent === value) return value;
+    const root = find(parent);
+    union.set(value, root);
+    return root;
+  };
+  const unite = (a: string, b: string) => {
+    const rootA = find(a);
+    const rootB = find(b);
+    if (rootA !== rootB) union.set(rootB, rootA);
+  };
+
+  const variantsPerGroup = groups.map((group) => group.variants);
+  for (const variants of variantsPerGroup) {
+    for (let i = 1; i < variants.length; i += 1) {
+      unite(variants[0]!, variants[i]!);
+    }
+  }
+
+  const byRoot = new Map<string, Set<string>>();
+  for (const variants of variantsPerGroup) {
+    for (const variant of variants) {
+      const root = find(variant);
+      const set = byRoot.get(root) ?? new Set<string>();
+      set.add(variant);
+      byRoot.set(root, set);
+    }
+  }
+  return [...byRoot.values()]
+    .map((set) => [...set])
+    .filter((variants) => variants.length >= 2)
+    .map((variants) => ({ key: variants.join("\u0000"), variants }));
+}
+
+/** Split a long chapter at section boundaries so term enumeration has a
+ *  recall-safe window; short chapters stay in one piece. */
+export function splitChapterForExtraction(content: string, maxChars = 16_000): string[] {
+  if (content.length <= maxChars) return [content];
+  const lines = content.split(/\r?\n/u);
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let currentLength = 0;
+
+  for (const line of lines) {
+    if (currentLength > 0 && currentLength + line.length > maxChars && /^##\s+/u.test(line)) {
+      chunks.push(current.join("\n"));
+      current = [];
+      currentLength = 0;
+    }
+    current.push(line);
+    currentLength += line.length + 1;
+  }
+  if (current.length) chunks.push(current.join("\n"));
+  if (chunks.length > 2) {
+    // Keep the audit cheap: fold the overflow back into the last chunk.
+    const head = chunks.slice(0, 1);
+    const tail = chunks.slice(1).join("\n\n");
+    return [head[0]!, tail];
+  }
+  return chunks;
 }
 
 /** Map verified conflict groups into book-wide conflicts and locate chapters. */
@@ -413,25 +490,31 @@ export async function runTerminologyAudit(
 
   try {
     // Stage 1: per-chapter term enumeration (an easy task the model does well).
+    // Long chapters are split at section boundaries so enumeration keeps its
+    // recall — a single 20k-char pass silently misses variant spellings.
     const perChapter = await runInBatches(chapters, AUDIT_CONCURRENCY, async (chapter) => {
       const content = chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
-      const raw = await dispatchAgentText({
-        agent: "REVIEWER",
-        prompt: buildTermExtractionPrompt(
-          course,
-          content,
-          course.chapters.findIndex((item) => item.id === chapter.id) + 1,
-          chapter.title,
-        ),
-        temperature: 0.1,
-        maxTokens: 4096,
-        timeoutMs: AUDIT_TIMEOUT_MS,
-        maxAttempts: 1,
-        responseFormat: "json_object",
-        overrides: options.overrides,
-        mock: () => JSON.stringify({ terms: [] }),
+      const chunks = splitChapterForExtraction(content);
+      const termSets = await runInBatches(chunks, 1, async (chunk) => {
+        const raw = await dispatchAgentText({
+          agent: "REVIEWER",
+          prompt: buildTermExtractionPrompt(
+            course,
+            chunk,
+            course.chapters.findIndex((item) => item.id === chapter.id) + 1,
+            chapter.title,
+          ),
+          temperature: 0.1,
+          maxTokens: 4096,
+          timeoutMs: AUDIT_TIMEOUT_MS,
+          maxAttempts: 1,
+          responseFormat: "json_object",
+          overrides: options.overrides,
+          mock: () => JSON.stringify({ terms: [] }),
+        });
+        return parseChapterTerms(raw);
       });
-      return parseChapterTerms(raw);
+      return [...new Set(termSets.flat())];
     });
 
     const allTerms = [...new Set(perChapter.flat())].slice(0, MAX_TERMS_PER_BOOK);
@@ -466,7 +549,11 @@ export async function runTerminologyAudit(
       }
     }
 
-    const conflicts = buildConflictMap(groups, chapterContents);
+    // Transitive merge: a spelling shared by two groups must resolve to ONE
+    // canonical target, never two contradictory replacements.
+    const mergedGroups = mergeTransitiveGroups(groups);
+
+    const conflicts = buildConflictMap(mergedGroups, chapterContents);
     countVariantOccurrences(chapterContents, conflicts);
     const { replacements, conflicts: resolved } = chooseCanonicalReplacements(
       conflicts,

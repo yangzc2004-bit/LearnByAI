@@ -9,9 +9,41 @@ import {
   excerptAround,
   filterCoOccurringPairs,
   findNearDuplicatePairs,
+  mergeTransitiveGroups,
   parseChapterTerms,
   parseConflictGroups,
+  splitChapterForExtraction,
 } from "../../src/lib/maol/terminologyAudit";
+
+test("mergeTransitiveGroups unions groups that share a spelling", () => {
+  const merged = mergeTransitiveGroups([
+    { key: "a", variants: ["多步回报", "n步回报"] },
+    { key: "b", variants: ["n步回报", "n步回溯"] },
+    { key: "c", variants: ["马尔可夫", "马尔科夫"] },
+  ]);
+  const byKey = merged.map((group) => group.variants.sort().join("/")).sort();
+  assert.deepEqual(byKey, ["n步回报/n步回溯/多步回报", "马尔可夫/马尔科夫"]);
+});
+
+test("mergeTransitiveGroups leaves disjoint groups alone", () => {
+  const merged = mergeTransitiveGroups([
+    { key: "a", variants: ["同策略", "在策略"] },
+    { key: "b", variants: ["回放缓冲区", "重放缓冲区"] },
+  ]);
+  assert.equal(merged.length, 2);
+});
+
+test("splitChapterForExtraction splits long chapters at section boundaries", () => {
+  const content = Array.from({ length: 24 }, (_, i) => `## 小节${i}\n${"内容。".repeat(300)}`).join("\n");
+  assert.ok(content.length > 16_000, `content only ${content.length} chars`);
+  const chunks = splitChapterForExtraction(content, 16_000);
+  assert.equal(chunks.length, 2, `got ${chunks.length} chunks`);
+  const joined = chunks.join("\n");
+  for (const heading of ["## 小节0", "## 小节12", "## 小节23"]) {
+    assert.ok(joined.includes(heading), `${heading} lost in chunks`);
+  }
+  assert.deepEqual(splitChapterForExtraction("短章。"), ["短章。"]);
+});
 
 test("parseChapterTerms extracts, dedupes and caps term lists", () => {
   const parsed = parseChapterTerms(
