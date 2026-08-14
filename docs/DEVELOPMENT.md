@@ -256,6 +256,8 @@ Files under `src/lib/quality` provide:
 
 Background workers claim generation jobs before running them. Local fallback uses an in-process lease; Supabase mode uses the `claim_generation_job` RPC plus `locked_by`, `locked_until`, and `attempts` columns so concurrent cron invocations do not process the same queued job twice.
 
+**Pre-scale concurrency note (exercise answers).** Course writes are serialized by an in-process per-course lock (`withCourseUpdateLock` in `serverStore.ts`), which only spans a single Node process. The web process and the external worker are already separate processes, so the lock does not protect cross-process check-then-write sequences (e.g. an answer job racing a chapter regeneration); the fingerprint guards (`exerciseAnswersSourceContentHash`, cleared on body change and validated on read) absorb the visible symptom today. Before scaling to multiple worker instances or serverless, implement a database-level CAS — `chapters.body_hash` plus a `SELECT ... FOR UPDATE` + conditional-update RPC — and bump `public.learnbyai_schema_version()` together with the smoke/health expectations.
+
 Browser UI state is intentionally non-authoritative. The app may keep short-lived React state while a page is open, but course and annotation data is reloaded from the API after refresh/navigation and is not persisted in browser localStorage.
 
 ### API Surface

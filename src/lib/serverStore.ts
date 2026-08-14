@@ -1870,6 +1870,22 @@ async function requireSupabaseWrite(
   }
 }
 
+/**
+ * Serialize writes to one course within THIS Node process.
+ *
+ * Known limitation: the queue lives in process memory, so it does not span
+ * processes. Today's deployment (one web process + one worker loop) already
+ * crosses this boundary, but the collision window is tiny and no data-loss
+ * report exists; the fingerprint guards (exerciseAnswersSourceContentHash:
+ * cleared on body change, validated on read) absorb the visible symptom.
+ * Do NOT rely on this lock after scaling out.
+ *
+ * BEFORE adding a second worker instance / moving to serverless / any other
+ * multi-process writer, replace the check-then-write paths with a database-
+ * level CAS: add chapters.body_hash, an RPC that does SELECT ... FOR UPDATE
+ * then a conditional update, and bump public.learnbyai_schema_version()
+ * together with the smoke/health expectations.
+ */
 async function withCourseUpdateLock<T>(courseId: string, operation: () => Promise<T>) {
   const previous = courseUpdateLocks.get(courseId) ?? Promise.resolve();
   let release!: () => void;
