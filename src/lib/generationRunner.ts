@@ -3,7 +3,7 @@ import "server-only";
 import { appendJobEvent, completeGenerationJob, createGenerationJob, failGenerationJob, getGenerationJob, patchGenerationJob, upsertGenerationJob } from "./jobs";
 import { shouldRunInlineGeneration } from "./config";
 import { processChapterFigures } from "./figures";
-import { generateChapter, generateChapterDraft, planCourseOutline, reviewExistingChapterDraft } from "./maol/client";
+import { generateChapter, generateChapterDraft, generateExerciseAnswers, planCourseOutline, reviewExistingChapterDraft } from "./maol/client";
 import { markdownToSections } from "./maol/integrator";
 import { ModelOverrides } from "./modelOverrides";
 import { withQuotaConsumption } from "./quota";
@@ -449,10 +449,21 @@ export async function runChapterGenerationJob(input: {
           qualityReport: illustratedResponse.qualityReport,
           status: illustratedResponse.qualityReport.status === "failed" ? "quality_failed" : "ready",
           generationJobId: illustratedResponse.job?.id ?? job.id,
-          ...(illustratedResponse.exerciseAnswers ? { exerciseAnswers: illustratedResponse.exerciseAnswers } : {}),
         },
         input.request,
       );
+
+      // Exercise answers are a separate best-effort background pass: the
+      // chapter is already ready and readable here, so a slow answer provider
+      // can never hold the chapter hostage again.
+      await queueExerciseAnswersJob({
+        course: latestCourse ?? course,
+        chapterId: chapter.id,
+        content: illustratedResponse.content,
+        userId: job.userId ?? course.userId,
+        overrides,
+        request: input.request,
+      });
 
       return {
         job: getGenerationJob(response.job?.id ?? job.id) as GenerationJob | undefined,
@@ -517,6 +528,126 @@ export async function runChapterGenerationJob(input: {
       chapter: updated.chapters.find((item) => item.id === chapter.id),
     } as const;
   }
+}
+
+async function queueExerciseAnswersJob(input: {
+  course: Course;
+  chapterId: string;
+  content: string;
+  userId?: string;
+  overrides: ModelOverrides | undefined;
+  request?: Request;
+}) {
+  if (!/练习|习题/u.test(input.content)) return undefined;
+  const answerJob = createGenerationJob({
+    type: "exercise-answers",
+    courseId: input.course.id,
+    chapterId: input.chapterId,
+    userId: input.userId,
+    activeAgent: "REVIEWER",
+    status: "queued",
+    modelOverrides: input.overrides,
+    message: "练习详解已排队，将在后台生成，不影响章节阅读。",
+  });
+  const persisted = await saveServerGenerationJob(answerJob, input.request);
+  if (persisted && shouldRunInlineGeneration(input.request)) {
+    void runExerciseAnswersGenerationJob({
+      jobId: persisted.id,
+      request: input.request,
+    }).catch((error: unknown) => {
+      console.error("Background exercise answers generation failed", error);
+    });
+  }
+  return persisted;
+}
+
+/**
+ * Background exercise-answer pass. Decoupled from chapter delivery: the
+ * chapter is persisted as ready BEFORE this job is queued, and this runner
+ * only ever writes chapter.exerciseAnswers — never status/content/review.
+ * A failed or slow answer provider leaves the chapter untouched.
+ */
+export async function runExerciseAnswersGenerationJob(input: {
+  jobId: string;
+  request?: Request;
+  retry?: boolean;
+  claimed?: boolean;
+}): Promise<ChapterGenerationJobResult> {
+  const persistedJob = await getServerGenerationJob(input.jobId, input.request);
+  let job = getGenerationJob(input.jobId) ?? (persistedJob ? upsertGenerationJob(persistedJob) : undefined);
+  if (!job) {
+    return { error: "Generation job not found", status: 404, job: undefined } as const;
+  }
+  if (job.type !== "exercise-answers" || !job.courseId || !job.chapterId) {
+    return { job } as const;
+  }
+  if (job.status === "succeeded" && !input.retry) {
+    const chapterId = job.chapterId;
+    const course = job.courseId ? await getServerCourse(job.courseId, input.request) : undefined;
+    return { job, course, chapter: course?.chapters.find((item) => item.id === chapterId) } as const;
+  }
+  if ((job.status === "running" || job.status === "retrying") && !input.retry && !input.claimed) {
+    return { job } as const;
+  }
+  if (input.retry) {
+    const retryingJob = patchGenerationJob(job.id, {
+      status: "retrying",
+      error: undefined,
+      modelOverrides: job.modelOverrides,
+    });
+    if (retryingJob) {
+      await saveServerGenerationJob(retryingJob, input.request);
+      job = retryingJob;
+    }
+  }
+
+  const chapterId = job.chapterId;
+  const course = job.courseId ? await getServerCourse(job.courseId, input.request) : undefined;
+  const chapter = course?.chapters.find((item) => item.id === chapterId);
+  if (!course || !chapter) {
+    const failedJob = failGenerationJob(job.id, "Course or chapter unavailable for exercise answers job.");
+    if (failedJob) await saveServerGenerationJob(failedJob, input.request);
+    return {
+      error: "Chapter not found",
+      status: 404,
+      job: getGenerationJob(job.id) ?? failedJob ?? job,
+    } as const;
+  }
+  const content = getChapterBody(chapter);
+  if (!content) {
+    const failedJob = failGenerationJob(job.id, "Chapter content unavailable for exercise answers job.");
+    if (failedJob) await saveServerGenerationJob(failedJob, input.request);
+    return {
+      error: "Chapter content unavailable",
+      status: 404,
+      job: getGenerationJob(job.id) ?? failedJob ?? job,
+    } as const;
+  }
+
+  const overrides = job.modelOverrides;
+  const runningJob = patchGenerationJob(job.id, {
+    activeAgent: "REVIEWER",
+    status: "running",
+    modelOverrides: overrides,
+  }) ?? job;
+  await saveServerGenerationJob(runningJob, input.request);
+
+  const answers = await generateExerciseAnswers(course, chapter, content, job.id, async (updatedJob) => {
+    await saveServerGenerationJob(updatedJob, input.request);
+  }, overrides);
+
+  const latestCourse = await getServerCourse(course.id, input.request);
+  const updated = answers.length > 0
+    ? await updateServerChapter(latestCourse ?? course, chapter.id, { exerciseAnswers: answers }, input.request)
+    : (latestCourse ?? course);
+  const completedJob = completeGenerationJob(job.id, chapter.id);
+  if (completedJob) await saveServerGenerationJob(completedJob, input.request);
+
+  return {
+    job: getGenerationJob(job.id) ?? completedJob,
+    course: updated,
+    chapter: updated.chapters.find((item) => item.id === chapter.id),
+  } as const;
 }
 
 async function runDraftReviewChapterJob(input: {
@@ -624,10 +755,18 @@ async function runDraftReviewChapterJob(input: {
           qualityReport: illustratedResponse.qualityReport,
           status: illustratedResponse.qualityReport.status === "failed" ? "quality_failed" : "ready",
           generationJobId: illustratedResponse.job?.id ?? job.id,
-          ...(illustratedResponse.exerciseAnswers ? { exerciseAnswers: illustratedResponse.exerciseAnswers } : {}),
         },
         request,
       );
+
+      await queueExerciseAnswersJob({
+        course: latestCourse ?? course,
+        chapterId: chapter.id,
+        content: illustratedResponse.content,
+        userId: job.userId ?? course.userId,
+        overrides: overrides ?? job.modelOverrides,
+        request,
+      });
 
       return {
         job: getGenerationJob(response.job?.id ?? job.id) as GenerationJob | undefined,
@@ -787,6 +926,15 @@ async function runAuthorRewriteCandidate(input: {
       },
       request,
     );
+
+    await queueExerciseAnswersJob({
+      course: courseForDecision,
+      chapterId: baselineForDecision.id,
+      content: illustratedResponse.content,
+      userId: job.userId ?? course.userId,
+      overrides,
+      request,
+    });
 
     return {
       job: latestJob,

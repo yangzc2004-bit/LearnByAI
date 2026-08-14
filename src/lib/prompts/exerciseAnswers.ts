@@ -8,14 +8,14 @@ import { Chapter, Course, ExerciseAnswer } from "../types";
  * Generation failure is non-blocking — a chapter without answers still ships.
  */
 
-export function buildExerciseAnswersPrompt(course: Course, chapter: Chapter, content: string) {
+export function buildExerciseAnswersPrompt(course: Course, chapter: Chapter, content: string, questionCount: number) {
   return `你是一名教材习题解答员。下面是《${course.topic}》第「${chapter.title}」章的正文与结尾练习题。
 
-任务：为「## 练习」部分的每一道题写一份详细解答。只输出合法 JSON，结构为：
+本章「## 练习」部分共 ${questionCount} 道题。任务：为这 ${questionCount} 道题逐题写一份详细解答。只输出合法 JSON，结构为：
 {"answers":[{"questionIndex":1,"answer":"解答正文"}]}
 
 规则：
-- questionIndex 对应练习题在「## 练习」列表中的序号（从 1 开始），逐题对应，不得漏题、不得多编题。
+- questionIndex 对应练习题在「## 练习」列表中的序号（从 1 开始，最大 ${questionCount}），逐题对应，不得漏题、不得多编题、不得使用超出 ${questionCount} 的序号。
 - 每题解答：给出思路、关键推导或计算步骤、最终结果；计算题必须把数字算对；可用 $...$ 行内公式与 $$...$$ 块公式。
 - 写完所有解答后自查一遍：题—解是否一一对应、数字是否算对、结论是否回答了题目。不确定的题在解答末尾标注「（提示：本解仅供参考，建议自查）」，但不得拒绝解答。
 - 开放项目题给出可执行的方案路径与验收要点。
@@ -27,7 +27,46 @@ export function buildExerciseAnswersPrompt(course: Course, chapter: Chapter, con
 ${content}`;
 }
 
-export function parseExerciseAnswers(raw: string): ExerciseAnswer[] {
+const EXERCISE_SECTION_TITLE = /^(?:练习|习题|思考与练习|课后练习|练习与思考)$/u;
+
+/**
+ * Deterministically count the numbered questions in the first exercise-titled
+ * section (「## 练习」 and its accepted aliases). Used as the upper bound for
+ * the model's questionIndex — an answer for question 99 when the chapter only
+ * has 4 exercises is rejected instead of rendered.
+ */
+export function countExerciseQuestions(content: string): number {
+  const lines = content.split(/\r?\n/u);
+  let inExerciseSection = false;
+  let sectionLevel = 0;
+  let inSubSection = false;
+  let count = 0;
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,6})\s+(.+)$/u);
+    if (heading) {
+      const level = heading[1]?.length ?? 1;
+      if (inExerciseSection) {
+        // Any heading at or above the exercise level ends the section; a
+        // deeper heading starts a sub-part whose numbered items are not
+        // questions of the main list.
+        if (level <= sectionLevel) break;
+        inSubSection = true;
+        continue;
+      }
+      const title = (heading[2] ?? "").trim().replace(/^\d+(?:\.\d+)*\s*/u, "").replace(/\s+/gu, "");
+      if (EXERCISE_SECTION_TITLE.test(title)) {
+        inExerciseSection = true;
+        sectionLevel = level;
+      }
+      continue;
+    }
+    if (!inExerciseSection || inSubSection) continue;
+    if (/^\s*\d+[.)]\s+/u.test(line)) count += 1;
+  }
+  return count;
+}
+
+export function parseExerciseAnswers(raw: string, questionCount: number): ExerciseAnswer[] {
   let parsed: { answers?: unknown };
   try {
     parsed = parseJson<{ answers?: unknown }>(raw);
@@ -42,7 +81,7 @@ export function parseExerciseAnswers(raw: string): ExerciseAnswer[] {
     const record = entry as Record<string, unknown>;
     const questionIndex = typeof record.questionIndex === "number" ? record.questionIndex : undefined;
     const answer = typeof record.answer === "string" ? record.answer.trim() : "";
-    if (!Number.isInteger(questionIndex) || !answer || questionIndex! < 1 || seen.has(questionIndex!)) continue;
+    if (!Number.isInteger(questionIndex) || !answer || questionIndex! < 1 || questionIndex! > questionCount || seen.has(questionIndex!)) continue;
     seen.add(questionIndex!);
     answers.push({ questionIndex: questionIndex!, answer: answer.slice(0, 3000) });
   }

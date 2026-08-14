@@ -167,6 +167,9 @@ export default function ReaderPage() {
   }, [rightWidth]);
 
   const chapter = course?.chapters.find((item) => item.id === chapterId);
+  // The answer block binds to the FIRST exercise section only — a chapter with
+  // both 课后练习 and 拓展练习 must not render the same answer list twice.
+  const firstExerciseSectionIndex = sections.findIndex((section) => isExerciseSection(section));
   const currentIndex = course?.chapters.findIndex((c) => c.id === chapterId) ?? -1;
   const prevChapter = currentIndex > 0 && course ? course.chapters[currentIndex - 1] : null;
   const nextChapter = currentIndex < (course?.chapters.length ?? 0) - 1 && course ? course.chapters[currentIndex + 1] : null;
@@ -823,10 +826,10 @@ export default function ReaderPage() {
             >
               {sections.length > 0 ? (
                 <div className="space-y-8">
-                  {sections.map((section) => (
+                  {sections.map((section, index) => (
                     <section key={section.id} id={`section-${section.id}`} data-section-id={section.id}>
                       <MarkdownContent content={section.content} />
-                      {isExerciseSection(section) && chapter.exerciseAnswers?.length ? (
+                      {index === firstExerciseSectionIndex && chapter.exerciseAnswers?.length ? (
                         <ExerciseAnswersBlock answers={chapter.exerciseAnswers} />
                       ) : null}
                     </section>

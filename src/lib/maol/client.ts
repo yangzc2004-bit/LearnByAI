@@ -9,7 +9,7 @@ import { buildChapterRepairByAuthorPrompt, buildChapterChunkRepairByAuthorPrompt
 import { buildChapterReviewPrompt, buildChapterReviewJsonRepairPrompt } from "../prompts/chapterReviewer";
 import { getChapterDepthGuide } from "../prompts/chapterWriter";
 import { buildRevisePrompt } from "../prompts/revise";
-import { buildExerciseAnswersPrompt, parseExerciseAnswers } from "../prompts/exerciseAnswers";
+import { buildExerciseAnswersPrompt, countExerciseQuestions, parseExerciseAnswers } from "../prompts/exerciseAnswers";
 import {
   buildChapterContractCompactPrompt,
   buildChapterContractPrompt,
@@ -20,6 +20,7 @@ import {
 } from "../prompts/coursePlanner";
 import type { CourseBibleCore, CoursePlannerInput, CourseSkeleton } from "../prompts/coursePlanner";
 import { buildFormatGuardPrompt, postRepairMarkdown, preRepairMarkdown } from "../prompts/formatGuard";
+import { buildConceptGroundingIssues, normalizeNamedConcepts, normalizeSuspectConcepts } from "../quality/conceptGrounding";
 import { runChapterQualityPipelineWithRepair } from "../quality/pipeline";
 import { safeErrorMessage } from "../safeError";
 import { assertChapterPositionRequirements } from "../courseRequirementConstraints";
@@ -262,7 +263,6 @@ export async function generateChapter(
     formatted = normalizeChapterMarkdownHeading(course, chapter, quality.content);
     const qualityReport = quality.report;
     const sections = markdownToSections(chapter, formatted);
-    const exerciseAnswers = await generateExerciseAnswers(course, chapter, formatted, job.id, options.onJobUpdate, options.overrides);
     completeGenerationJob(job.id, chapter.id);
     polisherFuseByJob.delete(job.id);
 
@@ -271,7 +271,6 @@ export async function generateChapter(
       sections,
       review,
       qualityReport,
-      ...(exerciseAnswers.length ? { exerciseAnswers } : {}),
       job: getGenerationJob(job.id),
     };
   } catch (error) {
@@ -450,7 +449,6 @@ export async function reviewExistingChapterDraft(
   formatted = normalizeChapterMarkdownHeading(course, chapter, quality.content);
   const qualityReport = quality.report;
   const sections = markdownToSections(chapter, formatted);
-  const exerciseAnswers = await generateExerciseAnswers(course, chapter, formatted, job.id, options.onJobUpdate, options.overrides);
   completeGenerationJob(job.id, chapter.id);
   polisherFuseByJob.delete(job.id);
 
@@ -459,7 +457,6 @@ export async function reviewExistingChapterDraft(
     sections,
     review,
     qualityReport,
-    ...(exerciseAnswers.length ? { exerciseAnswers } : {}),
     job: getGenerationJob(job.id),
   };
 }
@@ -478,7 +475,7 @@ const EXERCISE_ANSWERS_TIMEOUT_MS = 180_000;
  * questions after the chapter passed quality review. Non-blocking — a
  * provider failure leaves the chapter without answers instead of failing it.
  */
-async function generateExerciseAnswers(
+export async function generateExerciseAnswers(
   course: Course,
   chapter: Chapter,
   content: string,
@@ -487,10 +484,20 @@ async function generateExerciseAnswers(
   overrides?: ModelOverrides,
 ) {
   if (!/练习|习题/u.test(content)) return [];
+  const questionCount = countExerciseQuestions(content);
+  if (questionCount === 0) {
+    const skippedJob = appendJobEvent(jobId, {
+      agent: "REVIEWER",
+      status: "running",
+      message: "未找到「## 练习」编号题目列表，跳过练习详解。",
+    }, { preserveJobStatus: true });
+    if (skippedJob) await onJobUpdate?.(skippedJob);
+    return [];
+  }
   const startedJob = appendJobEvent(jobId, {
     agent: "REVIEWER",
     status: "running",
-    message: "正在生成练习详解（题—解一致自查）。",
+    message: `正在生成练习详解（共 ${questionCount} 题，题—解一致自查）。`,
   }, { preserveJobStatus: true });
   if (startedJob) await onJobUpdate?.(startedJob);
 
@@ -498,7 +505,7 @@ async function generateExerciseAnswers(
     const raw = await dispatchAgentText({
       agent: "REVIEWER",
       jobId,
-      prompt: buildExerciseAnswersPrompt(course, chapter, content),
+      prompt: buildExerciseAnswersPrompt(course, chapter, content, questionCount),
       temperature: 0.2,
       maxTokens: 6144,
       timeoutMs: EXERCISE_ANSWERS_TIMEOUT_MS,
@@ -507,12 +514,12 @@ async function generateExerciseAnswers(
       overrides,
       mock: () => JSON.stringify({ answers: [] }),
     });
-    const answers = parseExerciseAnswers(raw);
+    const answers = parseExerciseAnswers(raw, questionCount);
     const doneJob = appendJobEvent(jobId, {
       agent: "REVIEWER",
       status: "running",
       message: answers.length
-        ? `练习详解完成：共 ${answers.length} 题。`
+        ? `练习详解完成：共 ${answers.length} 题（本章共 ${questionCount} 题）。`
         : "练习详解为空，本章暂不附答案。",
     }, { preserveJobStatus: true });
     if (doneJob) await onJobUpdate?.(doneJob);
@@ -541,21 +548,6 @@ type ReviewerJson = {
   summary?: string;
 };
 
-type SuspectConcept = { term: string; note?: string };
-
-function normalizeSuspectConcepts(value: unknown): SuspectConcept[] {
-  if (!Array.isArray(value)) return [];
-  const suspects: SuspectConcept[] = [];
-  for (const entry of value) {
-    if (!entry || typeof entry !== "object") continue;
-    const record = entry as Record<string, unknown>;
-    const term = typeof record.term === "string" ? record.term.trim().slice(0, 60) : "";
-    const note = typeof record.note === "string" ? record.note.trim().slice(0, 160) : "";
-    if (!term) continue;
-    suspects.push({ term, note });
-  }
-  return suspects.slice(0, 10);
-}
 
 async function reviewChapter(
   course: Course,
@@ -607,22 +599,24 @@ async function reviewChapter(
         source: "REVIEWER" as const,
       })) ?? [];
 
-    // Concept grounding: named concepts the reviewer suspects have no
-    // literature source. Warnings — they drive the AUTHOR repair loop (delete
-    // the term or mark it as book-specific), they never block the chapter.
-    const groundingIssues = normalizeSuspectConcepts(reviewer.suspectConcepts).map((suspect) => ({
-      check: "reviewer.concept_grounding",
-      severity: "warning" as const,
-      message: `疑似查无出处的概念「${suspect.term}」${suspect.note ? `：${suspect.note}` : "：未在权威文献中找到该说法"}。`,
-      suggestion: "确认该术语的文献出处；若为本书自定义概念，请在正文明确标注「本书自定义」，或改用领域标准术语。",
-      source: "REVIEWER" as const,
-    }));
+    // Concept grounding, triaged deterministically:
+    // - a suspect the Course Bible already defines is VERIFIED → no issue;
+    // - "unsupported" (no source in body or references, per the model) is the
+    //   only class allowed to drive the AUTHOR repair loop (warning);
+    // - "unverified" (the model merely does not recognize the term) stays
+    //   info-level: model ignorance must never delete legitimate concepts.
+    const bibleTerms = (course.courseBible.terminology ?? []).map((item) => item.term.trim()).filter(Boolean);
+    const groundingIssues = buildConceptGroundingIssues(
+      normalizeSuspectConcepts(reviewer.suspectConcepts),
+      bibleTerms,
+    );
 
     const issues = [
       ...report.issues.map((issue) => ({ ...issue, source: issue.source ?? ("TQH" as const) })),
       ...reviewerIssues,
       ...groundingIssues,
     ];
+    const namedConcepts = normalizeNamedConcepts(reviewer.namedConcepts);
     const score = Math.max(
       0,
       report.score - reviewerIssues.reduce((total, issue) => total + (issue.severity === "error" ? 20 : issue.severity === "warning" ? 8 : 2), 0),
@@ -633,6 +627,7 @@ async function reviewChapter(
       attempts: quality.attempts,
       report: {
       ...report,
+      ...(namedConcepts.length ? { namedConcepts } : {}),
       issues,
       score,
       status: issues.some((issue) => issue.severity === "error") || score < 80

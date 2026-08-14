@@ -1,7 +1,7 @@
 import "server-only";
 
 import { appendJobEvent, getGenerationJob } from "./jobs";
-import { runChapterGenerationJob, runCourseGenerationJob } from "./generationRunner";
+import { runChapterGenerationJob, runCourseGenerationJob, runExerciseAnswersGenerationJob } from "./generationRunner";
 import { MODEL_CONFIG_HEADER } from "./modelOverrides";
 import { claimServerGenerationJob, getServerGenerationJobForWorker, listRunnableGenerationJobs, recoverInterruptedGenerationJobs, refreshServerGenerationJobLease, releaseServerGenerationJob, saveServerGenerationJob } from "./serverStore";
 import { GenerationJob } from "./types";
@@ -104,6 +104,19 @@ async function runGenerationWorkerJob(
 
     if (claimed.type === "chapter") {
       const result = await runChapterGenerationJob({
+        jobId: claimed.id,
+        request: claimedRequest,
+        retry: shouldRetry,
+        claimed: true,
+      });
+      if (result.job?.status !== "running") {
+        await releaseServerGenerationJob(claimed.id, workerId, claimedRequest);
+      }
+      return { ...result, processed: true } as const;
+    }
+
+    if (claimed.type === "exercise-answers") {
+      const result = await runExerciseAnswersGenerationJob({
         jobId: claimed.id,
         request: claimedRequest,
         retry: shouldRetry,

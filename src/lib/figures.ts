@@ -9,21 +9,27 @@ const FIGURE_BLOCK_RE = /:::learnbyai-figure[^\n]*\n([\s\S]*?)\n:::/gu;
 const MAX_FIGURE_CAPTION = 80;
 
 /**
- * Figure policy routing. The user's chosen course figureMode wins:
- * - "model": AI image for every figure (unified style).
- * - "code": programmatic SVG for every figure.
+ * Figure policy routing. The user's chosen course figureMode wins for
+ * intent-only figures, BUT structured specs always render programmatically:
  * - "off": figures are stripped entirely (handled by the caller).
+ * - "code": programmatic SVG for every figure.
+ * - "model": AI image — except figures carrying a diagramSpec with labels
+ *   allowed, which must be vector-crisp (models garble long titles, chapter
+ *   numbering and arrow relations; the textbook map is the canonical case).
  * Default (undefined): AI image when an image model is configured, otherwise
- * programmatic SVG. The code renderer still draws structured specs (diagramSpec
- * chains) as proper flowcharts, so the fallback stays correct and readable.
+ * programmatic SVG, with the same structure-spec exception.
  */
 export function figureModeFor(
-  _placeholder: FigurePlaceholder,
+  placeholder: FigurePlaceholder,
   modelAvailable: boolean,
   courseMode?: FigureMode,
 ): ImageGenerationMode | "off" {
   if (courseMode === "off") return "off";
   if (courseMode === "code") return "code";
+  // Structured specs (diagramSpec chains with labels allowed) are always
+  // drawn as programmatic SVG — image models garble numbering, long titles
+  // and arrow relations in flowcharts.
+  if (placeholder.diagramSpec && placeholder.textLabelsAllowed) return "code";
   if (courseMode === "model") return modelAvailable ? "model" : "code";
   return modelAvailable ? "model" : "code";
 }
@@ -225,10 +231,6 @@ function unwrapFencedFigurePayloads(content: string) {
 
 export async function createTextbookMapFigure(course: Course, overrides?: ModelOverrides): Promise<FigureAsset> {
   if (course.figureMode === "off") throw new Error("该课程已关闭插图生成。");
-  const mode: ImageGenerationMode =
-    course.figureMode === "code"
-      ? "code"
-      : getUserImageModelConfig(overrides) ? "model" : "code";
   const caption = "全书结构地图";
   const chapterNames = course.chapters.map((chapter, index) => `${index + 1}. ${chapter.title}`).join("；");
   const placeholder: FigurePlaceholder = {
@@ -237,6 +239,11 @@ export async function createTextbookMapFigure(course: Course, overrides?: ModelO
     diagramSpec: chapterNames,
     textLabelsAllowed: true,
   };
+  // The map is a structured spec (diagramSpec + labels allowed): it must go
+  // through the shared routing rule, so a configured image model can never
+  // garble chapter numbering, long titles or arrow relations.
+  const mode = figureModeFor(placeholder, Boolean(getUserImageModelConfig(overrides)), course.figureMode);
+  if (mode === "off") throw new Error("该课程已关闭插图生成。");
   const generated = mode === "model"
     ? await generateModelFigure(placeholder, overrides)
     : generateCodeFigure(placeholder, "教材地图");

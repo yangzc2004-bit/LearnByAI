@@ -36,13 +36,17 @@ JSON 结构：
     }
   ],
   "namedConcepts": ["本章引入的命名概念"],
-  "suspectConcepts": [{"term": "疑似查无出处的概念", "note": "为何可疑"}],
+  "suspectConcepts": [{"term": "疑似查无出处的概念", "status": "unverified|unsupported", "note": "为何可疑"}],
   "summary": "总体评价"
 }
 
 namedConcepts / suspectConcepts 规则：
 - namedConcepts 列出本章真正引入（而非仅仅使用）的命名概念，最多 12 个；没有就输出 []。
 - suspectConcepts 只列你判断「在权威文献中查无出处、可能是生造」的概念；判断标准是：该术语是否是你认识的领域标准术语？不认识且正文未给出文献出处的，列出来。没有就输出 []。
+- 每个 suspectConcept 必须给出 status：
+  - "unsupported"：你确认该术语在你认识的领域文献中不存在、且正文未给出任何出处（会触发自动修复）；
+  - "unverified"：你只是不认识或不确定它是否有出处（只提示人工核实，不会触发自动修复）。
+- 出现在 Course Bible 术语表（terminology）中的术语一律不要列为可疑。
 - suspectConcepts 不影响 passed 判定，但会作为 grounding 警告进入质检报告。
 
 判定标准：

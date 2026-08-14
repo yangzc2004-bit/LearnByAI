@@ -257,6 +257,9 @@ export type QualityReport = {
   score: number;
   status: QualityStatus;
   issues: QualityIssue[];
+  /** Named concepts the REVIEWER says this chapter introduces — persisted for
+   *  glossary/audit use; not part of issue-driven repair. */
+  namedConcepts?: string[];
   createdAt: string;
   /** Admin marked this failed report as handled; drops it from the attention badge/list. */
   acknowledgedAt?: string;
@@ -287,7 +290,7 @@ export type GenerationJob = {
   userId?: string;
   courseId?: string;
   chapterId?: string;
-  type: "course" | "chapter" | "annotation" | "export" | "figure";
+  type: "course" | "chapter" | "annotation" | "export" | "figure" | "exercise-answers";
   mode?: "generate" | "review_draft";
   status: JobStatus;
   activeAgent?: AgentName;
