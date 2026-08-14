@@ -50,22 +50,16 @@ export type TerminologyAuditReport = {
 };
 
 const AUDIT_TIMEOUT_MS = 180_000;
-const MAX_NGRAMS_PER_CHAPTER = 300;
-const MAX_NGRAMS_PER_BOOK = 3000;
-const MAX_JUDGE_PAIRS = 60;
+const MAX_JUDGE_PAIRS = 80;
 
 /**
- * Deterministic term candidate extraction: CJK runs of length 4-16 broken
- * into sliding 4-8 char windows, keeping only grams that appear at least
- * twice in the chapter. Three-character windows are skipped entirely — they
- * are dominated by cross-word shards (的动作, 为策略) that flood the judge's
- * slots. A shorter gram is suppressed when ≥90% of its occurrences are
- * covered by longer grams (价值函 ⊂ 价值函数). Complete recall, zero LLM cost.
+ * Full CJK gram map (length 4-8, whole runs up to 16 chars so term counts
+ * don't get broken at run seams). Unfiltered on purpose: the rare side of a
+ * real conflict (马尔科夫, appearing once next to 马尔可夫's dozens) must
+ * survive into candidate pairing.
  */
-export function extractCjkNgrams(content: string, maxTerms = MAX_NGRAMS_PER_CHAPTER): string[] {
+export function extractCjkGrams(content: string): Map<string, number> {
   const counts = new Map<string, number>();
-  // Match whole CJK runs (up to 16 chars) so term counts don't get broken by
-  // run truncation, then slide 4-8 char windows inside each run.
   for (const match of content.matchAll(/[\u4e00-\u9fff]{4,16}/gu)) {
     const run = match[0];
     for (let size = 4; size <= Math.min(8, run.length); size += 1) {
@@ -75,104 +69,98 @@ export function extractCjkNgrams(content: string, maxTerms = MAX_NGRAMS_PER_CHAP
       }
     }
   }
-  const entries = [...counts.entries()].filter(([, count]) => count >= 2);
-  // Longer grams first: accumulate how much of each shorter gram's frequency
-  // is explained by longer grams containing it.
-  entries.sort((a, b) => b[0].length - a[0].length || b[1] - a[1]);
-  const covered = new Map<string, number>();
-  const kept: [string, number][] = [];
-  for (const [gram, count] of entries) {
-    if ((covered.get(gram) ?? 0) >= count * 0.9) continue;
-    kept.push([gram, count]);
-    for (let size = 4; size < gram.length; size += 1) {
-      for (let start = 0; start + size <= gram.length; start += 1) {
-        const sub = gram.slice(start, start + size);
-        covered.set(sub, (covered.get(sub) ?? 0) + count);
-      }
-    }
-  }
-  return kept
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, maxTerms)
-    .map(([gram]) => gram);
-}
-
-/**
- * Near-duplicate seeds over the aggregated n-gram list: same length with
- * exactly one differing character. Purely a candidate generator — the
- * evidence judge decides whether the pair is truly the same concept.
- */
-export function findNearDuplicatePairs(terms: string[]): { english?: string; variants: string[] }[] {
-  const normalized = [...new Set(terms.map((term) => term.trim()))].filter(
-    (term) => term.length >= 4 && term.length <= 8,
-  );
-  const pairs: { english?: string; variants: string[] }[] = [];
-  const seen = new Set<string>();
-
-  for (let i = 0; i < normalized.length; i += 1) {
-    for (let j = i + 1; j < normalized.length; j += 1) {
-      const a = normalized[i]!;
-      const b = normalized[j]!;
-      if (a === b) continue;
-      const key = [a, b].sort().join("\u0000");
-      if (seen.has(key)) continue;
-      if (!isNearDuplicate(a, b)) continue;
-      seen.add(key);
-      pairs.push({ variants: [a, b] });
-    }
-  }
-  return pairs;
+  return counts;
 }
 
 function isNearDuplicate(a: string, b: string) {
   if (a.length !== b.length) return false;
   let diffs = 0;
   for (let k = 0; k < a.length; k += 1) {
-    if (a[k] !== b[k]) diffs += 1;
+    if (a[k] !== b[k]) {
+      diffs += 1;
+      if (diffs > 1) return false;
+    }
   }
   return diffs === 1;
 }
 
 /**
- * Only pairs whose two spellings co-occur inside the same chapter reach the
- * judge: a true inconsistency usually mixes both spellings in one place, while
- * cross-chapter-only pairs are much more likely to be different concepts.
+ * Candidate pairs within one chapter: every frequent gram (count ≥ 2) is
+ * matched against ALL same-length grams (including count-1 ones), so a rare
+ * spelling is never lost. Co-occurrence in the same chapter is guaranteed by
+ * construction. Pairs are ranked rare-side-first so the judge's slots go to
+ * the classic 1-vs-65 inconsistency, not balanced shard pairs.
  */
-export function filterCoOccurringPairs(
-  pairs: { variants: string[] }[],
-  chapterContents: string[],
-) {
-  return pairs.filter((pair) =>
-    chapterContents.some(
-      (content) =>
-        occurrencesOutsideFences(content, pair.variants[0] ?? "") > 0 &&
-        occurrencesOutsideFences(content, pair.variants[1] ?? "") > 0,
-    ),
-  );
+export function generateChapterCandidatePairs(content: string, maxPairs = 200): { variants: string[]; rare: number; imbalance: number; total: number }[] {
+  const counts = extractCjkGrams(content);
+  const frequent = [...counts.entries()]
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 400);
+  const byLength = new Map<number, string[]>();
+  for (const gram of counts.keys()) {
+    const list = byLength.get(gram.length) ?? [];
+    list.push(gram);
+    byLength.set(gram.length, list);
+  }
+
+  const pairs = new Map<string, { variants: string[]; rare: number; imbalance: number; total: number }>();
+  for (const [frequentGram, frequentCount] of frequent) {
+    for (const partner of byLength.get(frequentGram.length) ?? []) {
+      if (partner === frequentGram) continue;
+      if (!isNearDuplicate(frequentGram, partner)) continue;
+      const partnerCount = counts.get(partner) ?? 1;
+      const rare = Math.min(frequentCount, partnerCount);
+      const imbalance = Math.abs(frequentCount - partnerCount);
+      const key = [frequentGram, partner].sort().join("\u0000");
+      const existing = pairs.get(key);
+      if (!existing || rare < existing.rare || (rare === existing.rare && imbalance < existing.imbalance)) {
+        pairs.set(key, { variants: [frequentGram, partner], rare, imbalance, total: frequentCount + partnerCount });
+      }
+    }
+  }
+
+  return [...pairs.values()]
+    .sort((a, b) => a.rare - b.rare || a.imbalance - b.imbalance || b.total - a.total)
+    .slice(0, maxPairs);
 }
 
 /**
- * Rank pairs for the judge's limited slots: frequency imbalance first (a rare
- * spelling beside a dominant one is the signature of an inconsistency), then
- * total frequency.
+ * Merge per-chapter candidate pairs into one book-level ranked list for the
+ * judge: rare-side count ascending first (the signature of a real
+ * inconsistency), then imbalance ascending, then total frequency.
  */
-export function rankCandidatePairs(
-  pairs: { variants: string[] }[],
+export function rankBookCandidates(
+  chapterPairs: { variants: string[]; rare: number; imbalance: number; total: number }[][],
   chapterContents: string[],
+  maxPairs = 80,
 ) {
-  return pairs
+  const merged = new Map<string, { variants: string[]; rare: number; imbalance: number; total: number }>();
+  for (const pairs of chapterPairs) {
+    for (const pair of pairs) {
+      const key = pair.variants.sort().join("\u0000");
+      const existing = merged.get(key);
+      if (!existing || pair.rare < existing.rare || (pair.rare === existing.rare && pair.imbalance < existing.imbalance)) {
+        merged.set(key, pair);
+      }
+    }
+  }
+  return [...merged.values()]
     .map((pair) => {
       const counts = pair.variants.map((variant) =>
         chapterContents.reduce((sum, content) => sum + occurrencesOutsideFences(content, variant), 0),
       );
       return {
-        pair,
+        variants: pair.variants,
+        rare: Math.min(counts[0] ?? 0, counts[1] ?? 0),
         imbalance: Math.abs((counts[0] ?? 0) - (counts[1] ?? 0)),
         total: (counts[0] ?? 0) + (counts[1] ?? 0),
       };
     })
-    .sort((a, b) => b.imbalance - a.imbalance || b.total - a.total)
-    .map((item) => item.pair);
+    .filter((pair) => pair.total > 0)
+    .sort((a, b) => a.rare - b.rare || a.imbalance - b.imbalance || b.total - a.total)
+    .slice(0, maxPairs)
+    .map((pair) => ({ variants: pair.variants }));
 }
 
 /** Extract a short real sentence of context around the first occurrence. */
@@ -470,13 +458,12 @@ export async function runTerminologyAudit(
       (chapter) => chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "",
     );
 
-    // Stage 1 (deterministic, free): CJK n-grams per chapter → near-duplicate
-    // seeds → same-chapter co-occurrence filter → rank by frequency imbalance.
-    const allTerms = [...new Set(chapterContents.flatMap((content) => extractCjkNgrams(content)))].slice(0, MAX_NGRAMS_PER_BOOK);
-    const candidates = rankCandidatePairs(
-      filterCoOccurringPairs(findNearDuplicatePairs(allTerms), chapterContents),
-      chapterContents,
-    );
+    // Stage 1 (deterministic, free): per-chapter gram pairing — every frequent
+    // gram matched against ALL same-length grams (rare spellings included) —
+    // then a book-level rank that puts the rare-side-first inconsistencies
+    // (the 1-vs-65 signature) at the top of the judge's list.
+    const chapterPairs = chapterContents.map((content) => generateChapterCandidatePairs(content));
+    const candidates = rankBookCandidates(chapterPairs, chapterContents);
 
     // Stage 2 (one LLM call): evidence-backed judge over the ranked pairs.
     const judgeRaw = await dispatchAgentText({

@@ -7,66 +7,39 @@ import {
   chooseCanonicalReplacements,
   countVariantOccurrences,
   excerptAround,
-  extractCjkNgrams,
-  filterCoOccurringPairs,
-  findNearDuplicatePairs,
+  extractCjkGrams,
+  generateChapterCandidatePairs,
   mergeTransitiveGroups,
   parseConflictGroups,
-  rankCandidatePairs,
+  rankBookCandidates,
 } from "../../src/lib/maol/terminologyAudit";
 
-test("extractCjkNgrams keeps only grams appearing at least twice", () => {
-  const grams = extractCjkNgrams("马尔可夫决策过程与马尔可夫性质。偶尔出现的唯一词。");
-  assert.ok(grams.includes("马尔可夫"), JSON.stringify(grams));
-  assert.ok(!grams.includes("偶尔出现"), JSON.stringify(grams));
+test("extractCjkGrams builds a full count map with 4-8 char windows", () => {
+  const grams = extractCjkGrams("马尔可夫决策过程与马尔可夫性质。");
+  assert.equal(grams.get("马尔可夫"), 2, JSON.stringify([...grams.entries()]));
+  assert.equal(grams.get("马尔可夫决策过程"), 1);
 });
 
-test("extractCjkNgrams suppresses sub-word fragments of longer grams", () => {
-  const grams = extractCjkNgrams("价值函数的价值函数。状态价值是核心。状态价值很关键。");
-  assert.ok(!grams.includes("价值函"), JSON.stringify(grams));
-  assert.ok(!grams.includes("状态价"), JSON.stringify(grams));
-  assert.ok(grams.includes("价值函数"), JSON.stringify(grams));
-  // 状态价值 appears standalone (not only inside longer grams), so it stays.
-  assert.ok(grams.includes("状态价值"), JSON.stringify(grams));
-});
-
-test("findNearDuplicatePairs seeds same-length one-character-difference pairs", () => {
-  const pairs = findNearDuplicatePairs(["马尔可夫", "马尔科夫", "回放缓冲区", "重放缓冲区", "价值迭代", "策略迭代", "蒙特卡洛"]);
-  const flat = pairs.map((pair) => pair.variants.sort().join("/")).sort();
+test("generateChapterCandidatePairs pairs a frequent gram with a rare one-char-diff spelling", () => {
+  const content = "马尔可夫决策过程与马尔可夫性质。马尔科夫决策过程仅出现一次。".repeat(2);
+  const pairs = generateChapterCandidatePairs(content);
+  const flat = pairs.map((pair) => pair.variants.sort().join("/"));
   assert.ok(flat.includes("马尔可夫/马尔科夫"), JSON.stringify(flat));
-  assert.ok(flat.includes("回放缓冲区/重放缓冲区"), JSON.stringify(flat));
-  assert.ok(!flat.some((pair) => pair.includes("价值迭代") && pair.includes("策略迭代")), JSON.stringify(flat));
+  assert.ok(flat.includes("马尔可夫决策过程/马尔科夫决策过程"), JSON.stringify(flat));
+  // Ranked rare-side first: the 1-occurrence pairs come before balanced pairs.
+  const firstRare = pairs[0]?.rare ?? 99;
+  for (const pair of pairs.slice(0, 5)) {
+    assert.ok((pair.rare ?? 99) >= firstRare - 0, JSON.stringify(pairs.slice(0, 5)));
+  }
 });
 
-test("filterCoOccurringPairs keeps only pairs whose variants share a chapter", () => {
-  const contents = [
-    "本章讨论马尔可夫决策过程，其中马尔科夫链被反复使用。",
-    "本章只有重放缓冲区方法，另一章才有回放缓冲区。",
-    "回放缓冲区与重放缓冲区同时出现在这一章。",
-  ];
-  const pairs = filterCoOccurringPairs(
+test("rankBookCandidates ranks rare-side-first across chapters", () => {
+  const ranked = rankBookCandidates(
     [
-      { variants: ["马尔可夫", "马尔科夫"] },
-      { variants: ["回放缓冲区", "重放缓冲区"] },
+      [{ variants: ["同义甲", "同义乙"], rare: 20, imbalance: 3, total: 43 }],
+      [{ variants: ["马尔可夫", "马尔科夫"], rare: 1, imbalance: 64, total: 65 }],
     ],
-    contents,
-  );
-  assert.equal(pairs.length, 2, JSON.stringify(pairs));
-});
-
-test("rankCandidatePairs puts frequency-imbalanced pairs first", () => {
-  const contents = [
-    "马尔可夫 ".repeat(30) + "马尔科夫",
-    "回放缓冲区 ".repeat(10) + "重放缓冲区 ".repeat(9),
-    "状态价值 ".repeat(20) + "动作价值 ".repeat(20),
-  ];
-  const ranked = rankCandidatePairs(
-    [
-      { variants: ["回放缓冲区", "重放缓冲区"] },
-      { variants: ["状态价值", "动作价值"] },
-      { variants: ["马尔可夫", "马尔科夫"] },
-    ],
-    contents,
+    ["同义甲 同义乙 ".repeat(20) + "马尔可夫 ".repeat(64) + "马尔科夫"],
   );
   assert.deepEqual(ranked[0]?.variants, ["马尔可夫", "马尔科夫"], JSON.stringify(ranked));
 });
