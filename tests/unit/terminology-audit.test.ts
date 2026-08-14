@@ -21,6 +21,15 @@ test("extractCjkNgrams keeps only grams appearing at least twice", () => {
   assert.ok(!grams.includes("偶尔出现"), JSON.stringify(grams));
 });
 
+test("extractCjkNgrams suppresses sub-word fragments of longer grams", () => {
+  const grams = extractCjkNgrams("价值函数的价值函数。状态价值是核心。状态价值很关键。");
+  assert.ok(!grams.includes("价值函"), JSON.stringify(grams));
+  assert.ok(!grams.includes("状态价"), JSON.stringify(grams));
+  assert.ok(grams.includes("价值函数"), JSON.stringify(grams));
+  // 状态价值 appears standalone (not only inside longer grams), so it stays.
+  assert.ok(grams.includes("状态价值"), JSON.stringify(grams));
+});
+
 test("findNearDuplicatePairs seeds same-length one-character-difference pairs", () => {
   const pairs = findNearDuplicatePairs(["马尔可夫", "马尔科夫", "同策略", "在策略", "价值迭代", "策略迭代", "蒙特卡洛"]);
   const flat = pairs.map((pair) => pair.variants.sort().join("/")).sort();

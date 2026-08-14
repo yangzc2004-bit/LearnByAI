@@ -55,23 +55,42 @@ const MAX_NGRAMS_PER_BOOK = 3000;
 const MAX_JUDGE_PAIRS = 60;
 
 /**
- * Deterministic term candidate extraction: CJK runs of length 2-8 broken into
+ * Deterministic term candidate extraction: CJK runs of length 3-8 broken into
  * sliding n-grams, keeping only grams that appear at least twice in the
- * chapter. Complete recall, zero LLM cost.
+ * chapter. A shorter gram is suppressed when ≥90% of its occurrences are
+ * covered by longer grams (价值函 ⊂ 价值函数), so the candidate list carries
+ * real words instead of grammatical shards. Complete recall, zero LLM cost.
  */
 export function extractCjkNgrams(content: string, maxTerms = MAX_NGRAMS_PER_CHAPTER): string[] {
   const counts = new Map<string, number>();
-  for (const match of content.matchAll(/[\u4e00-\u9fff]{2,8}/gu)) {
+  // Match whole CJK runs (up to 16 chars) so term counts don't get broken by
+  // run truncation, then slide 3-8 char windows inside each run.
+  for (const match of content.matchAll(/[\u4e00-\u9fff]{3,16}/gu)) {
     const run = match[0];
-    for (let size = 2; size <= run.length; size += 1) {
+    for (let size = 3; size <= Math.min(8, run.length); size += 1) {
       for (let start = 0; start + size <= run.length; start += 1) {
         const gram = run.slice(start, start + size);
         counts.set(gram, (counts.get(gram) ?? 0) + 1);
       }
     }
   }
-  return [...counts.entries()]
-    .filter(([, count]) => count >= 2)
+  const entries = [...counts.entries()].filter(([, count]) => count >= 2);
+  // Longer grams first: accumulate how much of each shorter gram's frequency
+  // is explained by longer grams containing it.
+  entries.sort((a, b) => b[0].length - a[0].length || b[1] - a[1]);
+  const covered = new Map<string, number>();
+  const kept: [string, number][] = [];
+  for (const [gram, count] of entries) {
+    if ((covered.get(gram) ?? 0) >= count * 0.9) continue;
+    kept.push([gram, count]);
+    for (let size = 3; size < gram.length; size += 1) {
+      for (let start = 0; start + size <= gram.length; start += 1) {
+        const sub = gram.slice(start, start + size);
+        covered.set(sub, (covered.get(sub) ?? 0) + count);
+      }
+    }
+  }
+  return kept
     .sort((a, b) => b[1] - a[1])
     .slice(0, maxTerms)
     .map(([gram]) => gram);
