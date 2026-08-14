@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   applyTerminologyReplacements,
+  applyTerminologyReplacementsToString,
   buildConflictMap,
   chooseCanonicalReplacements,
   countVariantOccurrences,
+  excerptAround,
+  filterCoOccurringPairs,
   findNearDuplicatePairs,
   parseChapterTerms,
   parseConflictGroups,
@@ -27,23 +30,45 @@ test("findNearDuplicatePairs seeds same-length one-character-difference pairs", 
   const flat = pairs.map((pair) => pair.variants.sort().join("/")).sort();
   assert.ok(flat.includes("马尔可夫/马尔科夫"), JSON.stringify(flat));
   assert.ok(flat.includes("同策略/在策略"), JSON.stringify(flat));
-  // Two-character differences are NOT seeds (价值迭代 vs 策略迭代 differ in 2 positions).
   assert.ok(!flat.some((pair) => pair.includes("价值迭代") && pair.includes("策略迭代")), JSON.stringify(flat));
 });
 
-test("parseConflictGroups parses the judge output and skips single-variant groups", () => {
+test("filterCoOccurringPairs keeps only pairs whose variants share a chapter", () => {
+  const contents = [
+    "本章讨论马尔可夫决策过程，其中马尔科夫链被反复使用。",
+    "本章只有在策略方法，另一章才有同策略。",
+    "同策略与在策略同时出现在这一章。",
+  ];
+  const pairs = filterCoOccurringPairs(
+    [
+      { variants: ["马尔可夫", "马尔科夫"] },
+      { variants: ["同策略", "在策略"] },
+    ],
+    contents,
+  );
+  assert.equal(pairs.length, 2, JSON.stringify(pairs));
+});
+
+test("excerptAround returns a short real context around the token", () => {
+  const content = "前言部分文字。这里是马尔科夫决策过程的定义段落，随后继续。";
+  const excerpt = excerptAround(content, "马尔科夫", 20);
+  assert.ok(excerpt.includes("马尔科夫"), excerpt);
+  assert.ok(excerpt.length <= 20 + 3 + 20 + 6, excerpt);
+});
+
+test("parseConflictGroups parses evidence-judge decisions", () => {
   const groups = parseConflictGroups(
     JSON.stringify({
-      conflicts: [
-        { english: "Markov", variants: ["马尔可夫", "马尔科夫"] },
-        { english: "on-policy", variants: ["同策略", "在策略"] },
-        { variants: ["单一写法"] },
+      groups: [
+        { variants: ["马尔可夫", "马尔科夫"], same: true, reason: "同为 Markov 译名" },
+        { variants: ["硬更新", "软更新"], same: false, reason: "反义词" },
+        { variants: ["单一写法"], same: true },
       ],
     }),
   );
   assert.equal(groups.length, 2);
-  assert.deepEqual(groups[0], { key: "markov", english: "Markov", variants: ["马尔可夫", "马尔科夫"] });
-  assert.deepEqual(groups[1], { key: "on-policy", english: "on-policy", variants: ["同策略", "在策略"] });
+  assert.deepEqual(groups[0], { key: "马尔可夫\u0000马尔科夫", variants: ["马尔可夫", "马尔科夫"], same: true, reason: "同为 Markov 译名" });
+  assert.equal(groups[1]?.same, false);
 });
 
 test("parseConflictGroups rejects non-JSON", () => {
@@ -57,37 +82,44 @@ test("buildConflictMap locates chapters and countVariantOccurrences counts outsi
     "```python\n# 马尔科夫 is code, ignored\n```",
   ];
   const conflicts = buildConflictMap(
-    [{ key: "markov", variants: ["马尔可夫", "马尔科夫"] }],
+    [{ key: "a", variants: ["马尔可夫", "马尔科夫"] }],
     contents,
   );
-  const markov = conflicts.get("markov");
+  const markov = conflicts.get("a");
   assert.ok(markov);
   assert.deepEqual(markov!.chapters, [1, 2]);
   countVariantOccurrences(contents, conflicts);
   assert.equal(markov!.occurrences, 4);
 });
 
-test("chooseCanonicalReplacements picks the most frequent form", () => {
+test("chooseCanonicalReplacements picks the most frequent form and drops non-CJK pairs", () => {
   const conflicts = buildConflictMap(
-    [{ key: "markov", variants: ["马尔可夫", "马尔科夫"] }],
-    ["马尔可夫 马尔可夫 马尔可夫", "马尔科夫"],
+    [
+      { key: "markov", variants: ["马尔可夫", "马尔科夫"] },
+      { key: "acronyms", variants: ["GRPO", "TRPO"] },
+    ],
+    ["马尔可夫 马尔可夫 马尔可夫", "马尔科夫 GRPO TRPO"],
   );
-  const { replacements, conflicts: resolved } = chooseCanonicalReplacements(conflicts, ["马尔可夫 马尔可夫 马尔可夫", "马尔科夫"], []);
-  assert.equal(resolved.length, 1);
+  const { replacements, conflicts: resolved } = chooseCanonicalReplacements(
+    conflicts,
+    ["马尔可夫 马尔可夫 马尔可夫", "马尔科夫 GRPO TRPO"],
+    [],
+  );
+  assert.equal(resolved.length, 1, JSON.stringify(resolved));
   assert.deepEqual(replacements, [{ from: "马尔科夫", to: "马尔可夫" }]);
 });
 
 test("Course Bible terminology overrides frequency when choosing the canonical form", () => {
   const conflicts = buildConflictMap(
-    [{ key: "bellman", variants: ["贝尔曼", "Bellman"] }],
-    ["Bellman Bellman Bellman 方程", "贝尔曼方程"],
+    [{ key: "a", variants: ["回放缓冲区", "重放缓冲区"] }],
+    ["回放缓冲区 回放缓冲区 回放缓冲区", "重放缓冲区"],
   );
   const { replacements } = chooseCanonicalReplacements(
     conflicts,
-    ["Bellman Bellman Bellman 方程", "贝尔曼方程"],
-    [{ term: "贝尔曼", definition: "Bellman" }],
+    ["回放缓冲区 回放缓冲区 回放缓冲区", "重放缓冲区"],
+    [{ term: "重放缓冲区", definition: "replay buffer" }],
   );
-  assert.deepEqual(replacements, [{ from: "Bellman", to: "贝尔曼" }]);
+  assert.deepEqual(replacements, [{ from: "回放缓冲区", to: "重放缓冲区" }]);
 });
 
 test("applyTerminologyReplacements skips fenced code blocks", () => {
@@ -105,10 +137,16 @@ test("applyTerminologyReplacements skips fenced code blocks", () => {
 });
 
 test("applyTerminologyReplacements refuses substring corruption", () => {
-  // "马尔可夫" must not be a substring of the canonical "马尔可夫链".
   const { content, applied } = applyTerminologyReplacements("马尔可夫链与马尔可夫。", [
     { from: "马尔可夫", to: "马尔可夫链" },
   ]);
   assert.equal(applied, 0);
   assert.equal(content, "马尔可夫链与马尔可夫。");
+});
+
+test("applyTerminologyReplacementsToString rewrites plain strings (chapter titles)", () => {
+  assert.equal(
+    applyTerminologyReplacementsToString("马尔科夫决策过程", [{ from: "马尔科夫", to: "马尔可夫" }]),
+    "马尔可夫决策过程",
+  );
 });

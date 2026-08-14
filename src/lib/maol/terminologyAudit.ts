@@ -11,17 +11,19 @@ import { ModelOverrides } from "../modelOverrides";
  * Whole-book terminology consistency audit (the "马尔科夫 vs 马尔可夫" class
  * of defect).
  *
- * Two-stage design, because asking an LLM to "find variant spellings" directly
- * inside a 20k-char chapter is a rare-event task it reliably fails (returns an
- * empty list). Instead:
- *   1. Per chapter (easy): enumerate the Chinese terms that actually appear.
- *   2. Deterministic seeds: near-duplicate pairs over the aggregated term list
- *      (same length, one differing character — catches 马尔科夫/马尔可夫,
- *      同策略/在策略) so real conflicts can never miss the judge.
- *   3. One short book-level call (easy): judge which candidate pairs are truly
- *      the same concept, and add any pairs it sees in the full term list.
- *   4. Deterministic canonical choice (Course Bible convention first, then the
- *      most frequent spelling) and fence-safe replacement, chapter by chapter.
+ * Design notes, learned from real-book dry runs:
+ * - Asking an LLM to "find variant spellings" inside a 20k-char chapter is a
+ *   rare-event task it reliably fails (returns an empty list). Per-chapter
+ *   TERM ENUMERATION is easy and reliable instead.
+ * - Near-duplicate pairs (same length, one differing character) over the
+ *   aggregated term list guarantee that real conflicts reach the judge.
+ * - A judge that sees only the two words happily merges opposites (硬更新/软
+ *   更新) and different concepts (模仿学习/模型学习). So the judge sees
+ *   EVIDENCE: both words must co-occur in one chapter, and the prompt carries
+ *   one real sentence of context for each spelling.
+ * - Hard guards: both variants must contain CJK (no pure-English/acronym
+ *   merges like GRPO→TRPO), and the losing spelling is replaced only outside
+ *   code fences, plus in the chapter title.
  */
 
 export type TerminologyReplacement = { from: string; to: string };
@@ -36,6 +38,7 @@ export type TerminologyConflict = {
 export type TerminologyAuditReport = {
   status: "ok" | "skipped" | "failed";
   conflicts: TerminologyConflict[];
+  rejected: { variants: string[]; reason: string }[];
   replacements: TerminologyReplacement[];
   appliedToChapters: { chapterId: string; title: string; replacements: number }[];
   error?: string;
@@ -45,6 +48,7 @@ const AUDIT_CONCURRENCY = 2;
 const AUDIT_TIMEOUT_MS = 180_000;
 const MAX_TERMS_PER_CHAPTER = 80;
 const MAX_TERMS_PER_BOOK = 400;
+const MAX_JUDGE_PAIRS = 60;
 
 export function buildTermExtractionPrompt(
   course: Course,
@@ -98,10 +102,8 @@ export function parseChapterTerms(raw: string): string[] {
 
 /**
  * Deterministic near-duplicate seeds over the aggregated term list: same
- * length with exactly one differing character, or sharing a 2+ char head/tail
- * with a single-character difference elsewhere. Purely a candidate generator —
- * the book-level judge decides whether the pair is truly the same concept
- * (offline/online pairs like 离线策略/在线策略 are NOT).
+ * length with exactly one differing character. Purely a candidate generator —
+ * the evidence judge decides whether the pair is truly the same concept.
  */
 export function findNearDuplicatePairs(terms: string[]): { english?: string; variants: string[] }[] {
   const normalized = [...new Set(terms.map((term) => term.trim()))].filter(
@@ -134,49 +136,85 @@ function isNearDuplicate(a: string, b: string) {
   return diffs === 1;
 }
 
-export function buildConflictClassificationPrompt(
-  course: Course,
-  allTerms: string[],
-  candidatePairs: { english?: string; variants: string[] }[],
+/**
+ * Only pairs whose two spellings co-occur inside the same chapter reach the
+ * judge: a true inconsistency usually mixes both spellings in one place, while
+ * cross-chapter-only pairs are much more likely to be different concepts.
+ */
+export function filterCoOccurringPairs(
+  pairs: { variants: string[] }[],
+  chapterContents: string[],
 ) {
-  const termsText = allTerms.slice(0, MAX_TERMS_PER_BOOK).join("、");
-  const pairsText = candidatePairs
-    .slice(0, 60)
-    .map((pair, index) => `${index + 1}. ${pair.variants.join(" / ")}`)
-    .join("\n");
-  return `你是一名教材术语审计员。一本中文教材的全部术语已提取如下，其中一部分「疑似同义异形」的候选对也已列出。
-
-任务：找出「同一概念存在多种中文写法」的冲突组（例如「马尔科夫」与「马尔可夫」是同一概念 Markov 的两种写法；「同策略」与「在策略」都是 on-policy 的译名）。同义异形必须合并为一个冲突组；「离线策略」与「在线策略」这类反义或不同概念的对不要合并。
-
-只输出合法 JSON，结构为：
-{"conflicts":[{"english":"英文原词（可选）","variants":["写法1","写法2"]}]}
-
-规则：
-- 优先判断候选对；术语列表中还有候选对没覆盖的同义异形，也要输出。
-- variants 只使用术语列表或候选对里真实出现的写法，禁止发明新词。
-- 没有冲突就输出 {"conflicts":[]}。
-- 只输出 JSON，第一个字符必须是 {，最后一个字符必须是 }。
-
-候选对：
-${pairsText || "（无）"}
-
-全书术语列表：
-${termsText}`;
+  return pairs.filter((pair) =>
+    chapterContents.some(
+      (content) =>
+        occurrencesOutsideFences(content, pair.variants[0] ?? "") > 0 &&
+        occurrencesOutsideFences(content, pair.variants[1] ?? "") > 0,
+    ),
+  );
 }
 
-export function parseConflictGroups(raw: string): { key: string; english?: string; variants: string[] }[] {
-  let parsed: { conflicts?: unknown };
+/** Extract a short real sentence of context around the first occurrence. */
+export function excerptAround(content: string, token: string, radius = 50): string {
+  const index = content.indexOf(token);
+  if (index === -1) return "";
+  const start = Math.max(0, index - radius);
+  const end = Math.min(content.length, index + token.length + radius);
+  return content.slice(start, end).replace(/\s+/gu, " ").trim();
+}
+
+export function buildConflictJudgementPrompt(
+  pairs: { variants: string[] }[],
+  chapterContents: string[],
+) {
+  const evidence = pairs
+    .slice(0, MAX_JUDGE_PAIRS)
+    .map((pair, index) => {
+      const [a, b] = pair.variants;
+      const chapter = chapterContents.find(
+        (content) =>
+          occurrencesOutsideFences(content, a ?? "") > 0 &&
+          occurrencesOutsideFences(content, b ?? "") > 0,
+      );
+      const excerptA = chapter ? excerptAround(chapter, a ?? "") : "";
+      const excerptB = chapter ? excerptAround(chapter, b ?? "") : "";
+      return [
+        `${index + 1}. 「${a}」 / 「${b}」`,
+        excerptA ? `   「${a}」上下文：…${excerptA}…` : "",
+        excerptB ? `   「${b}」上下文：…${excerptB}…` : "",
+      ].filter(Boolean).join("\n");
+    })
+    .join("\n");
+
+  return `你是一名教材术语审计员。下面是若干「疑似同义异形」的术语候选对，每个候选对都附了教材原文中的真实上下文。
+
+任务：逐一判断这两个词在该教材语境中是否指向同一概念、在同一位置可以互换而不改变含义。判断依据必须是给出的上下文，不是词形相似。
+
+只输出合法 JSON，结构为：
+{"groups":[{"variants":["词A","词B"],"same":true,"reason":"简短理由"}]}
+
+判定规则：
+- 只有「同一概念的两种译名/写法」才判 same:true（如「马尔科夫」与「马尔可夫」同为 Markov；「同策略」与「在策略」同为 on-policy；「回放缓冲区」与「重放缓冲区」同为 replay buffer）。
+- 反义词、相反操作、不同概念、不同算法必须判 same:false，例如「硬更新」与「软更新」、「旧策略」与「新策略」、「模仿学习」与「模型学习」、「正态分布」与「状态分布」、「泛化误差」与「优化误差」。
+- 纯英文缩写对（如 GRPO 与 TRPO）一律 same:false。
+- 只输出 JSON，第一个字符必须是 {，最后一个字符必须是 }。
+
+候选对与上下文：
+${evidence || "（无候选对）"}`;
+}
+
+export function parseConflictGroups(raw: string): { key: string; variants: string[]; same: boolean; reason: string }[] {
+  let parsed: { groups?: unknown };
   try {
-    parsed = parseJson<{ conflicts?: unknown }>(raw);
+    parsed = parseJson<{ groups?: unknown }>(raw);
   } catch {
     return [];
   }
-  if (!Array.isArray(parsed.conflicts)) return [];
-  const groups: { key: string; english?: string; variants: string[] }[] = [];
-  for (const entry of parsed.conflicts) {
+  if (!Array.isArray(parsed.groups)) return [];
+  const groups: { key: string; variants: string[]; same: boolean; reason: string }[] = [];
+  for (const entry of parsed.groups) {
     if (!entry || typeof entry !== "object") continue;
     const record = entry as Record<string, unknown>;
-    const english = typeof record.english === "string" ? record.english.trim() : "";
     const variants = Array.isArray(record.variants)
       ? record.variants.filter((item): item is string => typeof item === "string")
           .map((item) => item.trim().slice(0, 20))
@@ -184,16 +222,14 @@ export function parseConflictGroups(raw: string): { key: string; english?: strin
       : [];
     const distinct = [...new Set(variants)];
     if (distinct.length < 2) continue;
-    groups.push({
-      key: (english || distinct[0] || "").toLowerCase().replace(/\s+/gu, " "),
-      english: english || undefined,
-      variants: distinct,
-    });
+    const same = record.same === true;
+    const reason = typeof record.reason === "string" ? record.reason.trim().slice(0, 120) : "";
+    groups.push({ key: distinct.join("\u0000"), variants: distinct, same, reason });
   }
   return groups;
 }
 
-/** Map conflict groups into book-wide conflicts and locate their chapters. */
+/** Map verified conflict groups into book-wide conflicts and locate chapters. */
 export function buildConflictMap(
   groups: { key: string; variants: string[] }[],
   chapterContents: string[],
@@ -231,6 +267,11 @@ export function countVariantOccurrences(chapterContents: string[], conflicts: Ma
   }
 }
 
+/** Both variants must contain CJK — pure-English/acronym merges are forbidden. */
+function isCjkVariant(value: string) {
+  return /[\u4e00-\u9fff]/u.test(value) && !/[A-Za-z]{2,}/u.test(value);
+}
+
 /**
  * Pick the canonical spelling for each conflict: a Course Bible terminology
  * entry that matches a variant wins; otherwise the most frequent spelling.
@@ -245,15 +286,15 @@ export function chooseCanonicalReplacements(
   const seen = new Set<string>();
 
   for (const conflict of conflicts.values()) {
-    const variants = conflict.variants;
+    const variants = conflict.variants.filter(isCjkVariant);
     if (variants.length < 2) continue;
     const distinct = variants.filter((item, index) => variants.indexOf(item) === index);
     if (distinct.length < 2) continue;
 
     // A replacement must not be a substring of the canonical form (would
-    // corrupt the longer word) and must not swallow English/Latin tokens.
+    // corrupt the longer word).
     const safePair = (from: string, to: string) =>
-      from !== to && from.length >= 2 && !to.includes(from) && /[\u4e00-\u9fff]|[A-Za-z]{2,}/u.test(from);
+      from !== to && from.length >= 2 && !to.includes(from);
 
     const bibleMatch = bibleTerms.find((term) =>
       distinct.some((variant) => term.term.includes(variant) || variant.includes(term.term)),
@@ -318,6 +359,15 @@ export function applyTerminologyReplacements(markdown: string, replacements: Ter
   return { content: out.join("\n"), applied };
 }
 
+/** Apply replacements to a plain string (chapter titles), no fences involved. */
+export function applyTerminologyReplacementsToString(value: string, replacements: TerminologyReplacement[]): string {
+  let next = value;
+  for (const replacement of replacements) {
+    next = next.split(replacement.from).join(replacement.to);
+  }
+  return next;
+}
+
 function occurrencesOutsideFences(content: string, token: string) {
   let count = 0;
   const lines = content.split(/\r?\n/u);
@@ -358,7 +408,7 @@ export async function runTerminologyAudit(
     return content.trim().length > 0;
   });
   if (chapters.length < 2) {
-    return { status: "skipped", conflicts: [], replacements: [], appliedToChapters: [] };
+    return { status: "skipped", conflicts: [], rejected: [], replacements: [], appliedToChapters: [] };
   }
 
   try {
@@ -384,26 +434,38 @@ export async function runTerminologyAudit(
       return parseChapterTerms(raw);
     });
 
-    const allTerms = [...new Set(perChapter.flat())];
-    const candidatePairs = findNearDuplicatePairs(allTerms);
-
-    // Stage 2: one short book-level call judges the candidate pairs (easy).
-    const judgeRaw = await dispatchAgentText({
-      agent: "REVIEWER",
-      prompt: buildConflictClassificationPrompt(course, allTerms, candidatePairs),
-      temperature: 0.1,
-      maxTokens: 2048,
-      timeoutMs: AUDIT_TIMEOUT_MS,
-      maxAttempts: 1,
-      responseFormat: "json_object",
-      overrides: options.overrides,
-      mock: () => JSON.stringify({ conflicts: [] }),
-    });
-    const groups = parseConflictGroups(judgeRaw);
-
+    const allTerms = [...new Set(perChapter.flat())].slice(0, MAX_TERMS_PER_BOOK);
     const chapterContents = chapters.map(
       (chapter) => chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "",
     );
+
+    // Deterministic seeds, filtered to same-chapter co-occurrence only.
+    const coOccurring = filterCoOccurringPairs(findNearDuplicatePairs(allTerms), chapterContents);
+
+    const rejected: TerminologyAuditReport["rejected"] = [];
+    const groups: { key: string; variants: string[] }[] = [];
+    if (coOccurring.length > 0) {
+      // Stage 2: one short evidence-backed judge call.
+      const judgeRaw = await dispatchAgentText({
+        agent: "REVIEWER",
+        prompt: buildConflictJudgementPrompt(coOccurring, chapterContents),
+        temperature: 0.1,
+        maxTokens: 2048,
+        timeoutMs: AUDIT_TIMEOUT_MS,
+        maxAttempts: 1,
+        responseFormat: "json_object",
+        overrides: options.overrides,
+        mock: () => JSON.stringify({ groups: [] }),
+      });
+      for (const decision of parseConflictGroups(judgeRaw)) {
+        if (decision.same) {
+          groups.push({ key: decision.key, variants: decision.variants });
+        } else if (decision.reason || decision.variants.length >= 2) {
+          rejected.push({ variants: decision.variants, reason: decision.reason || "判定为不同概念，已跳过。" });
+        }
+      }
+    }
+
     const conflicts = buildConflictMap(groups, chapterContents);
     countVariantOccurrences(chapterContents, conflicts);
     const { replacements, conflicts: resolved } = chooseCanonicalReplacements(
@@ -413,14 +475,17 @@ export async function runTerminologyAudit(
     );
 
     if (replacements.length === 0) {
-      return { status: "ok", conflicts: resolved, replacements: [], appliedToChapters: [] };
+      return { status: "ok", conflicts: resolved, rejected, replacements: [], appliedToChapters: [] };
     }
 
     const appliedToChapters: TerminologyAuditReport["appliedToChapters"] = [];
     for (const chapter of chapters) {
       const content = chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
       const { content: nextContent, applied } = applyTerminologyReplacements(content, replacements);
-      if (applied === 0 || nextContent === content) continue;
+      const nextTitle = applyTerminologyReplacementsToString(chapter.title, replacements);
+      const titleChanged = nextTitle !== chapter.title;
+      const totalApplied = applied + (titleChanged ? 1 : 0);
+      if (totalApplied === 0 || nextContent === content && !titleChanged) continue;
       if (!options.dryRun) {
         const sections = chapter.sections?.length
           ? markdownToSections(chapter, nextContent)
@@ -428,16 +493,17 @@ export async function runTerminologyAudit(
         await updateServerChapter(
           course,
           chapter.id,
-          { content: nextContent, ...(sections ? { sections } : {}) },
+          { content: nextContent, ...(sections ? { sections } : {}), ...(titleChanged ? { title: nextTitle } : {}) },
           options.request,
         );
       }
-      appliedToChapters.push({ chapterId: chapter.id, title: chapter.title, replacements: applied });
+      appliedToChapters.push({ chapterId: chapter.id, title: nextTitle, replacements: totalApplied });
     }
 
     return {
       status: "ok",
       conflicts: resolved,
+      rejected,
       replacements,
       appliedToChapters,
     };
@@ -448,6 +514,7 @@ export async function runTerminologyAudit(
     return {
       status: "failed",
       conflicts: [],
+      rejected: [],
       replacements: [],
       appliedToChapters: [],
       error: safeErrorMessage(error, "术语一致性审计失败。"),
