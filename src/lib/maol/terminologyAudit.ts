@@ -263,7 +263,7 @@ async function runInBatches<T, R>(
 
 export async function runTerminologyAudit(
   course: Course,
-  options: { overrides?: ModelOverrides; request?: Request } = {},
+  options: { overrides?: ModelOverrides; request?: Request; dryRun?: boolean } = {},
 ): Promise<TerminologyAuditReport> {
   const chapters = course.chapters.filter((chapter) => {
     const content = chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
@@ -317,15 +317,17 @@ export async function runTerminologyAudit(
       const content = chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
       const { content: nextContent, applied } = applyTerminologyReplacements(content, replacements);
       if (applied === 0 || nextContent === content) continue;
-      const sections = chapter.sections?.length
-        ? markdownToSections(chapter, nextContent)
-        : chapter.sections;
-      await updateServerChapter(
-        course,
-        chapter.id,
-        { content: nextContent, ...(sections ? { sections } : {}) },
-        options.request,
-      );
+      if (!options.dryRun) {
+        const sections = chapter.sections?.length
+          ? markdownToSections(chapter, nextContent)
+          : chapter.sections;
+        await updateServerChapter(
+          course,
+          chapter.id,
+          { content: nextContent, ...(sections ? { sections } : {}) },
+          options.request,
+        );
+      }
       appliedToChapters.push({ chapterId: chapter.id, title: chapter.title, replacements: applied });
     }
 
