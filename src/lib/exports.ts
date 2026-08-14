@@ -8,6 +8,7 @@ import { createFigureMarkdownRe } from "./figures";
 import { ILLUSTRATION_URL_PREFIX, readIllustrationImage } from "./illustration";
 import { createSupabaseServiceClient } from "./supabase/server";
 import { rasterizeSvg, renderCoursePdf } from "./pdf";
+import { safeErrorMessage } from "./safeError";
 import { compileLatexProject, TeXCompileError } from "./texCompiler";
 import { Course, ExportJob } from "./types";
 
@@ -25,12 +26,7 @@ export async function createCourseExport(
   const chapter = options.chapterId
     ? course.chapters.find((item) => item.id === options.chapterId)
     : undefined;
-  const content =
-    format === "tex"
-      ? await toTex(course)
-      : course.contentMode === "textbook" && !chapter
-        ? await renderTextbookPdf(course, exportId)
-        : await renderCoursePdf(course.id, { chapterId: chapter?.id });
+  const content = await buildExportContent(course, format, exportId, chapter);
   const baseName = chapter
     ? `${sanitize(course.topic)}-${sanitize(chapter.title)}`
     : sanitize(course.topic);
@@ -55,6 +51,29 @@ export async function createCourseExport(
 
 export function getExportJob(id: string) {
   return exportJobs.get(id);
+}
+
+async function buildExportContent(
+  course: Course,
+  format: ExportJob["format"],
+  exportId: string,
+  chapter: Course["chapters"][number] | undefined,
+): Promise<string | Buffer> {
+  if (format === "tex") return toTex(course);
+
+  if (course.contentMode === "textbook" && !chapter) {
+    try {
+      return await renderTextbookPdf(course, exportId);
+    } catch (error) {
+      // The designed TeX pipeline failed (e.g. a LaTeX error in some chapter
+      // content). Fall back to the HTML print render so a whole-book export
+      // never hard-fails — the user still gets a complete PDF.
+      console.warn(`[exports] textbook TeX compile failed, falling back to HTML render: ${safeErrorMessage(error, "TeX compile error")}`);
+      return await renderCoursePdf(course.id, {});
+    }
+  }
+
+  return renderCoursePdf(course.id, { chapterId: chapter?.id });
 }
 
 export async function readExportContent(job: ExportJob) {
@@ -416,18 +435,42 @@ export async function markdownToTex(markdown: string, options: TexOptions = {}) 
       continue;
     }
 
-    // Display math ($$ ... $$) passes through untouched.
+    // Display math ($$ ... $$) passes through untouched — but stray/unpaired
+    // "$$" lines (a known author-output artifact) must never swallow the prose
+    // that follows them into a math block. TeX display math cannot contain
+    // blank lines, so an opener whose closer does not appear before the next
+    // blank line is stray and is dropped.
     if (/^\s*\$\$/u.test(line)) {
       const single = /^\s*\$\$[^$]+\$\$\s*$/u.test(line);
-      out.push(line);
-      index += 1;
-      if (!single) {
-        while (index < lines.length) {
-          out.push(lines[index] ?? "");
-          const closed = /\$\$\s*$/u.test(lines[index] ?? "");
-          index += 1;
-          if (closed) break;
+      if (single) {
+        out.push(line);
+        index += 1;
+        continue;
+      }
+
+      if (line.trim() !== "$$") {
+        // Opener with trailing content on the same line — pass through.
+        out.push(line);
+        index += 1;
+        continue;
+      }
+
+      let closer = index + 1;
+      while (closer < lines.length && (lines[closer] ?? "").trim() !== "") {
+        if (/\$\$\s*$/u.test(lines[closer] ?? "")) break;
+        closer += 1;
+      }
+
+      if (closer < lines.length && /\$\$\s*$/u.test(lines[closer] ?? "")) {
+        // Empty block (consecutive "$$" lines) is rejected by TeX — drop it.
+        const empty = closer === index + 1 && (lines[closer] ?? "").trim() === "$$";
+        if (!empty) {
+          for (let k = index; k <= closer; k += 1) out.push(lines[k] ?? "");
         }
+        index = closer + 1;
+      } else {
+        // Stray opener: no closer before a blank line or EOF — drop it only.
+        index += 1;
       }
       continue;
     }

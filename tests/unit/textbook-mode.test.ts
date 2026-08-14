@@ -151,6 +151,45 @@ test("markdownToTex drops the duplicate 第 N 章 heading", async () => {
   assert.ok(tex.includes("正文段落。"), tex);
 });
 
+test("markdownToTex keeps a legit multi-line display block", async () => {
+  const md = "$$\nA = \\begin{bmatrix} 1 & 2 \\\\ 3 & 4 \\end{bmatrix}\n$$\n\n后面是正文。";
+  const tex = await markdownToTex(md);
+  assert.ok(tex.includes("$$"), tex);
+  assert.ok(tex.includes("\\begin{bmatrix}"), tex);
+  assert.ok(tex.includes("后面是正文。"), tex);
+  assert.equal(tex.split("$$").length - 1, 2, `expected exactly one $$ pair: ${tex}`);
+});
+
+test("markdownToTex drops a stray $$ that would swallow following prose", async () => {
+  // Author-output artifact: an extra "$$" after a complete display block used
+  // to open a math block that swallowed all prose up to the next "$$".
+  const md = [
+    "$$",
+    "A = \\begin{bmatrix} 0.8 & 0.4 \\\\ 0.3 & 0.7 \\end{bmatrix}",
+    "$$",
+    "$$",
+    "",
+    "这个矩阵的生态学含义是：对角线元素是自身密度制约强度。",
+    "",
+    "$$",
+    "r = 0.8",
+    "$$",
+    "",
+    "结尾段落。",
+  ].join("\n");
+  const tex = await markdownToTex(md);
+  assert.ok(tex.includes("这个矩阵的生态学含义是"), tex);
+  assert.ok(tex.includes("结尾段落。"), tex);
+  assert.equal(tex.split("$$").length - 1, 4, `two legit pairs kept, stray dropped: ${tex}`);
+});
+
+test("markdownToTex drops empty consecutive $$ pairs", async () => {
+  const md = "$$ 内容 $$ 前文\n\n$$\n$$\n\n正文。";
+  const tex = await markdownToTex(md);
+  assert.ok(tex.includes("正文。"), tex);
+  assert.ok(!/\\$\\$\\s*\\$\\$/u.test(tex), `empty pair should be dropped: ${tex}`);
+});
+
 test("markdownToTex strips writer numbering from section headings (TeX counters own numbers)", async () => {
   const tex = await markdownToTex("## 3.2 策略迭代\n\n### 3.2.1 收敛性");
   assert.ok(tex.includes("\\section{策略迭代}"), tex);

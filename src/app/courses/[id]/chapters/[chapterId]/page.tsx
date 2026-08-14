@@ -123,7 +123,7 @@ export default function ReaderPage() {
   const [loading, setLoading] = useState(true);
   const [generationError, setGenerationError] = useState("");
   const [requalitying, setRequalitying] = useState(false);
-  const [exporting, setExporting] = useState(false);
+  const [exporting, setExporting] = useState<"" | "chapter" | "book">("");
 
   const [tocOpen, setTocOpen] = useState(true);
   const [expandedChapters, setExpandedChapters] = useState<Record<string, boolean>>({});
@@ -203,13 +203,17 @@ export default function ReaderPage() {
     window.addEventListener("mouseup", onUp);
   }
 
-  async function exportChapter() {
-    if (!chapter || exporting) return;
-    setExporting(true);
+  async function downloadExport(kind: "chapter" | "book", options: { chapterId?: string; successMessage: string }) {
+    if (!course || exporting) return;
+    setExporting(kind);
     try {
       const response = await apiFetch("/api/exports", {
         method: "POST",
-        body: JSON.stringify({ courseId: id, format: "pdf", scope: "chapter", chapterId: chapter.id }),
+        body: JSON.stringify({
+          courseId: id,
+          format: "pdf",
+          ...(kind === "chapter" ? { scope: "chapter", chapterId: options.chapterId } : {}),
+        }),
       });
       const data = await response.json();
       if (!response.ok || !data.export) throw new Error(data.error ?? "导出失败");
@@ -218,17 +222,26 @@ export default function ReaderPage() {
       const blob = await download.blob();
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
-      link.download = data.export.fileName ?? `${chapter.title}.pdf`;
+      link.download = data.export.fileName ?? `${course.topic}.pdf`;
       document.body.appendChild(link);
       link.click();
       link.remove();
       URL.revokeObjectURL(link.href);
-      toast.success("PDF 已导出");
+      toast.success(options.successMessage);
     } catch (error) {
       toast.error(publicSafeErrorMessage(error, "导出失败，请稍后重试。"));
     } finally {
-      setExporting(false);
+      setExporting("");
     }
+  }
+
+  function exportChapter() {
+    if (!chapter) return;
+    void downloadExport("chapter", { chapterId: chapter.id, successMessage: "本章 PDF 已导出" });
+  }
+
+  function exportWholeBook() {
+    void downloadExport("book", { successMessage: "全书 PDF 已导出" });
   }
 
   const latestChapterEvent = chapterGenerationJobId ? jobEvents[chapterGenerationJobId]?.at(-1) : undefined;
@@ -650,13 +663,23 @@ export default function ReaderPage() {
               {formatMinutes(totalMinutes(chapter.time))}
             </span>
             <div className="h-4 w-px bg-border" />
-            <button
-              onClick={exportChapter}
-              disabled={!canPrint || exporting}
-              className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Download size={14} /> {exporting ? "导出中…" : "导出 PDF"}
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={exportChapter}
+                disabled={!canPrint || Boolean(exporting)}
+                className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Download size={14} /> {exporting === "chapter" ? "导出中…" : "本章 PDF"}
+              </button>
+              <button
+                onClick={exportWholeBook}
+                disabled={!course || Boolean(exporting)}
+                title="导出整本教材"
+                className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Download size={14} /> {exporting === "book" ? "导出中…" : "全书 PDF"}
+              </button>
+            </div>
             <div className="h-4 w-px bg-border" />
             <div className="flex items-center gap-1">
               {prevChapter && (
