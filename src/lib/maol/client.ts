@@ -10,7 +10,7 @@ import { buildChapterReviewPrompt, buildChapterReviewJsonRepairPrompt } from "..
 import { getChapterDepthGuide } from "../prompts/chapterWriter";
 import { buildRevisePrompt } from "../prompts/revise";
 import { buildExerciseAnswersPrompt, countExerciseQuestions, parseExerciseAnswers } from "../prompts/exerciseAnswers";
-import { buildLecturePrompt, buildMockLecture, parseLecture } from "../prompts/lecture";
+import { buildCompanionGuidePrompt, buildMockCompanionGuide, parseCompanionGuide } from "../prompts/companionGuide";
 import {
   buildChapterContractCompactPrompt,
   buildChapterContractPrompt,
@@ -25,7 +25,7 @@ import { buildConceptGroundingIssues, normalizeNamedConcepts, normalizeSuspectCo
 import { runChapterQualityPipelineWithRepair } from "../quality/pipeline";
 import { safeErrorMessage } from "../safeError";
 import { assertChapterPositionRequirements } from "../courseRequirementConstraints";
-import { Chapter, ChapterContract, ChapterGenerateResponse, ChapterLecture, ContentMode, Course, CourseBible, CourseCreateResponse, CourseDifficulty, CourseInputMaterial, DisciplineKind, ExerciseAnswer, ExplanationStyle, GenerationJob, GenerationProfile, LearningMode, QualityIssue, QualityReport, RevisionMode, RevisionScope, Section } from "../types";
+import { Chapter, ChapterContract, ChapterGenerateResponse, CompanionGuide, ContentMode, Course, CourseBible, CourseCreateResponse, CourseDifficulty, CourseInputMaterial, DisciplineKind, ExerciseAnswer, ExplanationStyle, GenerationJob, GenerationProfile, LearningMode, QualityIssue, QualityReport, RevisionMode, RevisionScope, Section } from "../types";
 import { researchLatestCourseKnowledge } from "../webResearch";
 import { dispatchAgentText } from "./dispatcher";
 import { assertMockFallbackAllowed } from "./fallback";
@@ -545,24 +545,25 @@ export async function generateExerciseAnswers(
   }
 }
 
-const LECTURE_TIMEOUT_MS = 300_000;
+const COMPANION_TIMEOUT_MS = 300_000;
 
 /**
- * Lecture (讲义) pass: condense one ready textbook chapter into a 15-20
- * minute self-study lesson. One AUTHOR call (plus at most one structural
- * retry), no figures, no planner. A provider failure throws so the caller can
- * fail only the lecture job — the chapter itself stays untouched.
+ * Companion-guide (AI 伴学指南) pass: condense one ready chapter into a
+ * 15-20 minute interactive self-study layer. One AUTHOR call (plus at most
+ * one structural retry), no figures, no planner. Works for textbook and
+ * lecture-mode chapters alike. A provider failure throws so the caller can
+ * fail only the companion job — the chapter itself stays untouched.
  */
-export async function generateLecture(
+export async function generateCompanionGuide(
   course: Course,
   chapter: Chapter,
   content: string,
   jobId: string,
   onJobUpdate?: (job: GenerationJob) => Promise<void> | void,
   overrides?: ModelOverrides,
-): Promise<ChapterLecture> {
+): Promise<CompanionGuide> {
   const chapterIndex = course.chapters.findIndex((item) => item.id === chapter.id);
-  const prompt = buildLecturePrompt(course, chapter, content, chapterIndex);
+  const prompt = buildCompanionGuidePrompt(course, chapter, content, chapterIndex);
 
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -571,8 +572,8 @@ export async function generateLecture(
         agent: "AUTHOR",
         status: "running",
         message: attempt === 0
-          ? "正在生成讲义：浓缩章节正文为 15~20 分钟自学讲义…"
-          : "讲义结构校验未通过，正在重试生成…",
+          ? "正在生成伴学指南：把章节正文浓缩成 15~20 分钟的自学指南…"
+          : "伴学指南结构校验未通过，正在重试生成…",
       }, { preserveJobStatus: true });
       if (startedJob) await onJobUpdate?.(startedJob);
 
@@ -581,39 +582,34 @@ export async function generateLecture(
         jobId,
         prompt: attempt === 0
           ? prompt
-          : `${prompt}\n\n# 结构校验失败，重新输出\n上次输出被确定性校验拒绝：${safeErrorMessage(lastError, "结构不合法")}\n请按输出结构要求重新生成完整 JSON，不要重复上次的错误。`,
+          : `${prompt}\n\n# 结构校验失败，重新输出\n上次输出被确定性校验拒绝：${safeErrorMessage(lastError, "结构不合法")}\n请按输出结构要求重新生成完整 JSON，不要输出任何解释文字。`,
         temperature: 0.45,
         maxTokens: 12_288,
-        timeoutMs: LECTURE_TIMEOUT_MS,
+        timeoutMs: COMPANION_TIMEOUT_MS,
         maxAttempts: 1,
         responseFormat: "json_object",
         overrides,
-        mock: () => JSON.stringify(buildMockLecture(chapter, chapterIndex)),
+        mock: () => JSON.stringify(buildMockCompanionGuide(chapter, chapterIndex)),
         onJobUpdate,
       });
 
-      const lecture = parseLecture(raw);
+      const guide = parseCompanionGuide(raw);
       const doneJob = appendJobEvent(jobId, {
         agent: "AUTHOR",
         status: "running",
-        message: `讲义生成完成：${lecture.blocks?.filter((block) => block.kind === "teach").length ?? 0} 个讲解块，自测 ${lecture.selfCheck?.length ?? 0} 题，小测 ${lecture.finalQuiz?.length ?? 0} 题。`,
+        message: `伴学指南生成完成：${guide.blocks?.filter((block) => block.kind === "teach").length ?? 0} 个讲解块，自测 ${guide.selfCheck?.length ?? 0} 题，小测 ${guide.finalQuiz?.length ?? 0} 题。`,
       }, { preserveJobStatus: true });
       if (doneJob) await onJobUpdate?.(doneJob);
-      return lecture;
+      return guide;
     } catch (error) {
       lastError = error;
     }
   }
-
-  const failedMessage = safeErrorMessage(lastError, "AUTHOR failed");
-  const failedJob = appendJobEvent(jobId, {
-    agent: "AUTHOR",
-    status: "running",
-    message: `讲义生成失败：${failedMessage}`,
-  }, { preserveJobStatus: true });
-  if (failedJob) await onJobUpdate?.(failedJob);
-  throw new Error(failedMessage);
+  throw lastError instanceof Error ? lastError : new Error("Companion-guide generation failed.");
 }
+
+/** @deprecated Renamed to generateCompanionGuide; kept for one release cycle. */
+export const generateLecture = generateCompanionGuide;
 
 type ReviewerJson = {
   passed?: boolean;

@@ -4,7 +4,7 @@ import { appendJobEvent, completeGenerationJob, createGenerationJob, failGenerat
 import { getChapterBody, hashChapterContent } from "./chapterContent";
 import { shouldRunInlineGeneration } from "./config";
 import { processChapterFigures } from "./figures";
-import { generateChapter, generateChapterDraft, generateExerciseAnswers, generateLecture, planCourseOutline, reviewExistingChapterDraft } from "./maol/client";
+import { generateChapter, generateChapterDraft, generateCompanionGuide, generateExerciseAnswers, planCourseOutline, reviewExistingChapterDraft } from "./maol/client";
 import { markdownToSections } from "./maol/integrator";
 import { ModelOverrides } from "./modelOverrides";
 import { withQuotaConsumption } from "./quota";
@@ -19,6 +19,7 @@ import {
   saveServerGenerationJobs,
   saveServerQualityReport,
   updateChapterAnswersIfContentHashMatches,
+  updateChapterCompanionIfContentHashMatches,
   updateServerChapter,
 } from "./serverStore";
 import { Chapter, ChapterGenerateResponse, Course, GenerationJob, QualityReport, TextbookMeta } from "./types";
@@ -730,13 +731,16 @@ async function supersedeExerciseAnswersJob(
 }
 
 /**
- * On-demand lecture (讲义) generation. Decoupled from the chapter: the
- * chapter stays untouched, and this runner only ever writes chapter.lecture.
- * Charged against the generate_lecture quota (user-initiated). Anchored to the
- * chapter content hash so a mid-flight regeneration supersedes the job
- * instead of persisting a lecture for an outdated chapter.
+/**
+ * On-demand companion-guide (AI 伴学指南) generation. Decoupled from the
+ * chapter: the chapter stays untouched, and this runner only ever writes
+ * chapter.companionGuide. Works for both content modes (textbook chapters
+ * and lecture-mode chapters). Charged against the generate_companion quota
+ * (user-initiated). Anchored to the chapter content hash so a mid-flight
+ * regeneration supersedes the job instead of persisting a guide for an
+ * outdated chapter.
  */
-export async function runLectureGenerationJob(input: {
+export async function runCompanionGuideGenerationJob(input: {
   jobId: string;
   request?: Request;
   retry?: boolean;
@@ -747,7 +751,9 @@ export async function runLectureGenerationJob(input: {
   if (!job) {
     return { error: "Generation job not found", status: 404, job: undefined } as const;
   }
-  if (job.type !== "lecture" || !job.courseId || !job.chapterId) {
+  // Legacy dispatch compatibility: jobs persisted before the rename keep
+  // type "lecture" and must still reach this runner.
+  if ((job.type !== "companion-guide" && job.type !== "lecture") || !job.courseId || !job.chapterId) {
     return { job } as const;
   }
   if (job.status === "succeeded" && !input.retry) {
@@ -763,7 +769,7 @@ export async function runLectureGenerationJob(input: {
   const course = await getServerCourse(job.courseId, input.request);
   const chapter = course?.chapters.find((item) => item.id === chapterId);
   if (!course || !chapter) {
-    const failedJob = failGenerationJob(job.id, "Course or chapter unavailable for lecture generation.");
+    const failedJob = failGenerationJob(job.id, "Course or chapter unavailable for companion-guide generation.");
     if (failedJob) await saveServerGenerationJob(failedJob, input.request);
     return {
       error: "Chapter not found",
@@ -773,7 +779,7 @@ export async function runLectureGenerationJob(input: {
   }
   const content = getChapterBody(chapter);
   if (!content) {
-    const failedJob = failGenerationJob(job.id, "Chapter content unavailable for lecture generation.");
+    const failedJob = failGenerationJob(job.id, "Chapter content unavailable for companion-guide generation.");
     if (failedJob) await saveServerGenerationJob(failedJob, input.request);
     return {
       error: "Chapter content unavailable",
@@ -784,7 +790,7 @@ export async function runLectureGenerationJob(input: {
   const contentHash = hashChapterContent(content);
 
   if (job.sourceContentHash && contentHash !== job.sourceContentHash && !input.retry) {
-    const message = "讲义任务已作废（superseded）：章节正文已被重新生成，内容指纹不一致，未写入任何讲义。可重新生成讲义，以针对当前正文。";
+    const message = "伴学任务已作废（superseded）：章节正文已被重新生成，内容指纹不一致，未写入任何伴学指南。可重新生成伴学指南，以针对当前正文。";
     const superseded = patchGenerationJob(job.id, { status: "superseded", error: message });
     const eventJob = appendJobEvent(job.id, {
       agent: "AUTHOR",
@@ -794,7 +800,7 @@ export async function runLectureGenerationJob(input: {
     const persisted = eventJob ?? superseded ?? job;
     await saveServerGenerationJob(persisted, input.request);
     return {
-      error: "Lecture job superseded by a newer chapter version.",
+      error: "Companion-guide job superseded by a newer chapter version.",
       status: 409,
       job: getGenerationJob(job.id) ?? persisted,
       course,
@@ -823,7 +829,7 @@ export async function runLectureGenerationJob(input: {
 
   let result: Awaited<ReturnType<typeof withQuotaConsumption<Course>>>;
   try {
-    result = await withQuotaConsumption(job.userId ?? course.userId, "generate_lecture", async () => {
+    result = await withQuotaConsumption(job.userId ?? course.userId, "generate_companion", async () => {
       const runningJob = patchGenerationJob(job.id, {
         activeAgent: "AUTHOR",
         status: "running",
@@ -832,10 +838,10 @@ export async function runLectureGenerationJob(input: {
       const running = runningJob ?? job;
       await saveServerGenerationJob(running, input.request);
       await updateServerChapter(course, chapterId, {
-        lecture: { status: "generating" },
+        companionGuide: { status: "generating" },
       }, input.request);
 
-      const lecture = await generateLecture(
+      const guide = await generateCompanionGuide(
         course,
         chapter,
         content,
@@ -846,48 +852,50 @@ export async function runLectureGenerationJob(input: {
         job.modelOverrides,
       );
 
-      // Write guard: re-read the latest course so a chapter regeneration that
-      // finished while the lecture call was in flight supersedes this job
-      // instead of writing a stale lecture.
-      const latestCourse = await getServerCourse(course.id, input.request);
-      const latestChapter = latestCourse?.chapters.find((item) => item.id === chapterId);
-      const latestContent = latestChapter ? getChapterBody(latestChapter) : "";
-      if (latestContent && hashChapterContent(latestContent) !== contentHash) {
-        throw new StaleLectureError("章节正文在讲义生成期间发生了变化。");
-      }
-
-      return await updateServerChapter(latestCourse ?? course, chapterId, {
-        lecture: {
-          ...lecture,
+      // Atomic write: the guide lands ONLY if the body fingerprint still
+      // matches — one course lock covers read + verify + write, so a
+      // regeneration that finished mid-flight turns this into a supersede
+      // instead of a stale write.
+      const write = await updateChapterCompanionIfContentHashMatches(
+        course.id,
+        chapterId,
+        contentHash,
+        {
+          ...guide,
           status: "ready",
           generatedAt: new Date().toISOString(),
           sourceContentHash: contentHash,
         },
-      }, input.request);
+        input.request,
+      );
+      if (!write.applied) {
+        throw new StaleCompanionGuideError("章节正文在伴学指南生成期间发生了变化。");
+      }
+      return write.course ?? course;
     });
   } catch (error) {
-    if (error instanceof StaleLectureError) {
-      return await failLectureGenerationJob({
+    if (error instanceof StaleCompanionGuideError) {
+      return await failCompanionGuideGenerationJob({
         job,
         course,
         chapterId,
-        message: `讲义任务已作废（superseded）：${error.message}`,
+        message: `伴学任务已作废（superseded）：${error.message}`,
         superseded: true,
         request: input.request,
       });
     }
-    return await failLectureGenerationJob({
+    return await failCompanionGuideGenerationJob({
       job,
       course,
       chapterId,
-      message: safeErrorMessage(error, "Lecture generation failed."),
+      message: safeErrorMessage(error, "Companion-guide generation failed."),
       request: input.request,
     });
   }
 
   if (!result.ok) {
-    const quotaMessage = result.quota.message ?? "Lecture generation quota exceeded.";
-    return await failLectureGenerationJob({
+    const quotaMessage = result.quota.message ?? "Companion-guide generation quota exceeded.";
+    return await failCompanionGuideGenerationJob({
       job,
       course,
       chapterId,
@@ -906,9 +914,12 @@ export async function runLectureGenerationJob(input: {
   } as const;
 }
 
-class StaleLectureError extends Error {}
+/** @deprecated Renamed to runCompanionGuideGenerationJob; kept for one release cycle. */
+export const runLectureGenerationJob = runCompanionGuideGenerationJob;
 
-async function failLectureGenerationJob(input: {
+class StaleCompanionGuideError extends Error {}
+
+async function failCompanionGuideGenerationJob(input: {
   job: GenerationJob;
   course: Course;
   chapterId: string;
@@ -940,7 +951,7 @@ async function failLectureGenerationJob(input: {
   await saveServerGenerationJob(persisted, request);
   if (!effectiveSuperseded) {
     await updateServerChapter(course, chapterId, {
-      lecture: { status: "failed", error: message },
+      companionGuide: { status: "failed", error: message },
     }, request);
   }
   return {

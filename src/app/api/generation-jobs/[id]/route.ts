@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireApiUser } from "@/lib/apiAuth";
 import { getGenerationJobForRequest } from "@/lib/generationJobStatus";
 import { failGenerationJob, getGenerationJob, patchGenerationJob, upsertGenerationJob } from "@/lib/jobs";
-import { runChapterGenerationJob, runCourseGenerationJob, runExerciseAnswersGenerationJob, runLectureGenerationJob } from "@/lib/generationRunner";
+import { runChapterGenerationJob, runCourseGenerationJob, runCompanionGuideGenerationJob, runExerciseAnswersGenerationJob } from "@/lib/generationRunner";
 import { parseModelOverridesFromHeaders } from "@/lib/modelOverrides";
 import { publicGenerationJob } from "@/lib/publicGenerationJob";
 import { checkQuota } from "@/lib/quota";
@@ -64,8 +64,8 @@ export async function POST(
           request,
           retry: input.retry,
         })
-      : job.type === "lecture"
-        ? await runLectureGenerationJob({
+      : job.type === "companion-guide" || job.type === "lecture"
+        ? await runCompanionGuideGenerationJob({
             jobId: id,
             request,
             retry: input.retry,
@@ -157,8 +157,8 @@ async function enqueueRetryJob(job: GenerationJob, request: Request) {
               sections: undefined,
               review: undefined,
               qualityReport: undefined,
-              // Chapter regeneration invalidates the condensed lecture.
-              lecture: undefined,
+              // Chapter regeneration invalidates the companion guide.
+              companionGuide: undefined,
               status: "queued",
               generationJobId: persistedJob.id,
             },
@@ -188,8 +188,9 @@ async function getActiveJobForSameTarget(job: GenerationJob, request: Request) {
   if (job.type === "chapter" && job.chapterId) {
     return getActiveServerGenerationJobForChapter(job.chapterId, request);
   }
-  if (job.type === "lecture" && job.chapterId) {
-    return getActiveServerGenerationJobForChapterOfType(job.chapterId, "lecture", request);
+  if ((job.type === "companion-guide" || job.type === "lecture") && job.chapterId) {
+    return (await getActiveServerGenerationJobForChapterOfType(job.chapterId, "companion-guide", request))
+      ?? (await getActiveServerGenerationJobForChapterOfType(job.chapterId, "lecture", request));
   }
   return undefined;
 }

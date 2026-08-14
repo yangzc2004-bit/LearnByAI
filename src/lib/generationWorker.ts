@@ -1,7 +1,7 @@
 import "server-only";
 
 import { appendJobEvent, getGenerationJob } from "./jobs";
-import { runChapterGenerationJob, runCourseGenerationJob, runExerciseAnswersGenerationJob, runLectureGenerationJob } from "./generationRunner";
+import { runChapterGenerationJob, runCourseGenerationJob, runCompanionGuideGenerationJob, runExerciseAnswersGenerationJob } from "./generationRunner";
 import { MODEL_CONFIG_HEADER } from "./modelOverrides";
 import { claimServerGenerationJob, getServerGenerationJobForWorker, listRunnableGenerationJobs, recoverInterruptedGenerationJobs, refreshServerGenerationJobLease, releaseServerGenerationJob, saveServerGenerationJob } from "./serverStore";
 import { GenerationJob } from "./types";
@@ -128,8 +128,8 @@ async function runGenerationWorkerJob(
       return { ...result, processed: true } as const;
     }
 
-    if (claimed.type === "lecture") {
-      const result = await runLectureGenerationJob({
+    if (claimed.type === "companion-guide" || claimed.type === "lecture") {
+      const result = await runCompanionGuideGenerationJob({
         jobId: claimed.id,
         request: claimedRequest,
         retry: shouldRetry,

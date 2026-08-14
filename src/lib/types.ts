@@ -388,7 +388,7 @@ export type GenerationJob = {
   userId?: string;
   courseId?: string;
   chapterId?: string;
-  type: "course" | "chapter" | "annotation" | "export" | "figure" | "exercise-answers" | "lecture";
+  type: "course" | "chapter" | "annotation" | "export" | "figure" | "exercise-answers" | "lecture" | "companion-guide";
   mode?: "generate" | "review_draft";
   status: JobStatus;
   activeAgent?: AgentName;
@@ -445,7 +445,7 @@ export type ExportJob = {
 export type UsageEvent = {
   id: string;
   userId?: string;
-  action: "create_course" | "generate_chapter" | "generate_lecture" | "ask_tutor" | "export" | "revise";
+  action: "create_course" | "generate_chapter" | "generate_lecture" | "ask_tutor" | "export" | "revise" | "generate_companion";
   createdAt: string;
 };
 

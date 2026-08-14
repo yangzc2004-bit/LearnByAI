@@ -4,6 +4,7 @@ const LIMITS: Record<UsageEvent["action"], number> = {
   create_course: 20,
   generate_chapter: 100,
   generate_lecture: 100,
+  generate_companion: 100,
   ask_tutor: 300,
   export: 30,
   revise: 200,
@@ -13,20 +14,19 @@ const LIMIT_ENV: Record<UsageEvent["action"], string> = {
   create_course: "QUOTA_CREATE_COURSE",
   generate_chapter: "QUOTA_GENERATE_CHAPTER",
   generate_lecture: "QUOTA_GENERATE_LECTURE",
+  generate_companion: "QUOTA_GENERATE_COMPANION",
   ask_tutor: "QUOTA_ASK_TUTOR",
   export: "QUOTA_EXPORT",
-  revise: "QUOTA_REVISE",
-};
-
 export function readQuotaLimit(action: UsageEvent["action"]) {
-  const configured = process.env[LIMIT_ENV[action]] ?? process.env.E2E_QUOTA_LIMIT;
+  const configured = process.env[LIMIT_ENV[action]]
+    ?? (action === "generate_companion" ? process.env.QUOTA_GENERATE_LECTURE : undefined)
+    ?? process.env.E2E_QUOTA_LIMIT;
   if (!configured) return LIMITS[action];
 
   const parsed = Number(configured);
   if (!Number.isFinite(parsed) || parsed < 0) return LIMITS[action];
   return Math.floor(parsed);
 }
-
 export async function readEffectiveQuotaLimit(action: UsageEvent["action"]) {
   const { getAdminAppSettings } = await import("./adminSettings");
   const settings = await getAdminAppSettings();

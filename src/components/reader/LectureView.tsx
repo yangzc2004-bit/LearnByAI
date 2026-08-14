@@ -95,7 +95,6 @@ export function LectureView({
       setSaving(false);
     }
   }
-  }
 
   function resetQuiz() {
     setSubmitted(false);
@@ -315,6 +314,7 @@ export function LectureView({
               </button>
             </div>
           )}
+        </section>
       )}
     </div>
   );

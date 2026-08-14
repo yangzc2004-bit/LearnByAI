@@ -12,7 +12,7 @@ import { resolveModelOverrides } from "./userModelConfig";
 
 export const ACTIVE_ADMIN_JOB_STATUSES: GenerationJob["status"][] = ["pending", "queued", "running", "retrying"];
 export const INACTIVE_ADMIN_JOB_STATUSES: GenerationJob["status"][] = ["succeeded", "failed"];
-export const USAGE_ACTIONS: UsageEvent["action"][] = ["create_course", "generate_chapter", "generate_lecture", "ask_tutor", "export", "revise"];
+export const USAGE_ACTIONS: UsageEvent["action"][] = ["create_course", "generate_chapter", "generate_lecture", "generate_companion", "ask_tutor", "export", "revise"];
 
 export type AdminUserRow = {
   id: string;
@@ -1226,8 +1226,8 @@ export async function enqueueAdminChapterGeneration(courseId: string, chapterId:
     sections: undefined,
     review: undefined,
     qualityReport: undefined,
-    // Chapter regeneration invalidates the condensed lecture.
-    lecture: undefined,
+    // Chapter regeneration invalidates the companion guide.
+    companionGuide: undefined,
     status: "queued",
     generationJobId: job.id,
   });
