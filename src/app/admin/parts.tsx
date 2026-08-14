@@ -34,6 +34,7 @@ export const QUALITY_STATUS_LABEL: Record<string, string> = {
 export const USAGE_ACTION_LABEL: Record<string, string> = {
   create_course: "创建课程",
   generate_chapter: "生成章节",
+  generate_companion: "伴学指南生成",
   ask_tutor: "导师问答",
   export: "导出",
   revise: "局部改写",
