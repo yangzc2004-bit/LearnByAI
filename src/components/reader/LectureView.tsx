@@ -120,7 +120,7 @@ export function LectureView({
             {lecture.learningObjectives!.map((objective, index) => (
               <li key={index} className="flex items-start gap-2 text-sm leading-relaxed">
                 <span className="mt-0.5 font-mono text-xs text-primary">{index + 1}.</span>
-                <MarkdownContent content={objective} variant="chat" />
+                <MarkdownContent content={objective} />
               </li>
             ))}
           </ul>
@@ -134,7 +134,7 @@ export function LectureView({
             return (
               <section key={index}>
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">回顾</p>
-                <MarkdownContent content={block.text} variant="chat" />
+                <MarkdownContent content={block.text} variant="textbook" />
               </section>
             );
           }
@@ -152,18 +152,18 @@ export function LectureView({
                 <div className="mb-3 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-primary">
                   <Lightbulb size={13} /> 直觉
                 </div>
-                <MarkdownContent content={block.intuition} variant="chat" />
+                <MarkdownContent content={block.intuition} variant="textbook" />
 
                 <div className="mb-3 mt-5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-primary">
                   <BookOpen size={13} /> 核心概念
                 </div>
                 <div className="mb-5 rounded-r-lg border-l-2 border-primary bg-muted/30 py-1 pl-4">
-                  <MarkdownContent content={block.concept} variant="chat" />
+                  <MarkdownContent content={block.concept} variant="textbook" />
                 </div>
 
                 <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400">例题</div>
                 <div className="rounded-r-lg border-l-2 border-amber-500/60 bg-amber-500/5 py-1 pl-4">
-                  <MarkdownContent content={block.example} variant="chat" />
+                  <MarkdownContent content={block.example} variant="textbook" />
                 </div>
 
                 {block.anchorSection && sectionId && (
@@ -186,7 +186,7 @@ export function LectureView({
                   {block.points.map((point, pointIndex) => (
                     <li key={pointIndex} className="flex items-start gap-2 text-sm leading-relaxed">
                       <span className="mt-0.5 font-mono text-xs text-amber-600 dark:text-amber-400">{pointIndex + 1}.</span>
-                      <MarkdownContent content={point} variant="chat" />
+                      <MarkdownContent content={point} variant="textbook" />
                     </li>
                   ))}
                 </ul>
@@ -196,7 +196,7 @@ export function LectureView({
           return (
             <section key={index} className="border-t border-border/60 pt-5">
               <h2 className="mb-2 text-sm font-semibold text-muted-foreground">下讲预告</h2>
-              <MarkdownContent content={block.text} variant="chat" />
+              <MarkdownContent content={block.text} variant="textbook" />
             </section>
           );
         })}
@@ -232,7 +232,7 @@ export function LectureView({
                 <div key={questionIndex} className="space-y-2">
                   <div className="flex items-start gap-2 text-sm font-medium text-foreground">
                     <span className="mt-0.5 font-mono text-xs text-muted-foreground">{questionIndex + 1}.</span>
-                    <MarkdownContent content={question.question} variant="chat" />
+                    <MarkdownContent content={question.question} variant="textbook" />
                   </div>
                   <div className="space-y-1.5 pl-5">
                     {question.options.map((option, optionIndex) => {
@@ -257,7 +257,7 @@ export function LectureView({
                           } disabled:cursor-default`}
                         >
                           <span className="mt-px font-mono text-xs">{String.fromCharCode(65 + optionIndex)}.</span>
-                          <MarkdownContent content={option} variant="chat" />
+                          <MarkdownContent content={option} variant="textbook" />
                         </button>
                       );
                     })}
@@ -265,7 +265,7 @@ export function LectureView({
                   {submitted && (
                     <div className={`pl-5 text-xs leading-relaxed ${isCorrect ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}>
                       {isCorrect ? "回答正确。" : isWrong ? "回答错误。" : "未作答。"}
-                      <MarkdownContent content={question.explanation} variant="chat" />
+                      <MarkdownContent content={question.explanation} variant="textbook" />
                     </div>
                   )}
                 </div>
@@ -314,7 +314,7 @@ function SelfCheckItem({ index, question, answer }: { index: number; question: s
     <div className="rounded-md border border-border bg-card px-4 py-3">
       <div className="flex items-start gap-2 text-sm text-foreground">
         <span className="mt-0.5 font-mono text-xs text-primary">{index + 1}.</span>
-        <MarkdownContent content={question} variant="chat" />
+        <MarkdownContent content={question} variant="textbook" />
       </div>
       <button
         type="button"
@@ -325,7 +325,7 @@ function SelfCheckItem({ index, question, answer }: { index: number; question: s
       </button>
       {open && (
         <div className="mt-2 border-t border-border/60 pt-2">
-          <MarkdownContent content={answer} variant="chat" />
+          <MarkdownContent content={answer} variant="textbook" />
         </div>
       )}
     </div>

@@ -52,6 +52,10 @@ test("buildLecturePrompt anchors the lecture to the chapter content and bible ru
   assert.ok(prompt.includes("逐字沿用 Course Bible 术语表"), prompt);
   assert.ok(prompt.includes("15~20 分钟阅读量"), prompt);
   assert.ok(prompt.includes("anchorSection"), prompt);
+  // Formulas must carry $ delimiters from the source (plus the render-side
+  // bare-LaTeX healing as a second line of defense).
+  assert.ok(prompt.includes("公式必须带定界符"), prompt);
+  assert.ok(prompt.includes("禁止输出不带 $ 的裸 LaTeX"), prompt);
 });
 
 test("extractChapterSectionNumbers collects unique N.M headings only", () => {

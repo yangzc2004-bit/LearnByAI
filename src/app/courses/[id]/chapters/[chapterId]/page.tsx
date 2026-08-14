@@ -163,14 +163,27 @@ function LecturePanel({
 }) {
   if (lecture?.status === "ready" && lecture.blocks) {
     return (
-      <LectureView
-        lecture={lecture}
-        chapterNumber={chapterNumber}
-        sections={sections}
-        progress={progress}
-        onSaveProgress={onSaveProgress}
-        onJumpToSection={onJumpToSection}
-      />
+      <div>
+        <div className="mb-2 flex justify-end">
+          <button
+            type="button"
+            onClick={onRequestLecture}
+            disabled={requesting}
+            className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+            title="重新浓缩当前章节正文生成讲义（消耗一次讲义配额）"
+          >
+            {requesting ? "重新生成中…" : "重新生成讲义"}
+          </button>
+        </div>
+        <LectureView
+          lecture={lecture}
+          chapterNumber={chapterNumber}
+          sections={sections}
+          progress={progress}
+          onSaveProgress={onSaveProgress}
+          onJumpToSection={onJumpToSection}
+        />
+      </div>
     );
   }
 
@@ -999,7 +1012,7 @@ export default function ReaderPage() {
               sections={sections}
               progress={lectureProgress}
               requesting={requestingLecture}
-              onRequestLecture={() => void requestLecture()}
+              onRequestLecture={() => void requestLecture({ retry: true })}
               onSaveProgress={saveLectureProgress}
               onJumpToSection={jumpToTextbookSection}
             />
