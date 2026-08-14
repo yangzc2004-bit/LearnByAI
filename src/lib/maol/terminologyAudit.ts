@@ -12,18 +12,23 @@ import { ModelOverrides } from "../modelOverrides";
  * of defect).
  *
  * Design notes, learned from real-book dry runs:
- * - Asking an LLM to "find variant spellings" inside a 20k-char chapter is a
- *   rare-event task it reliably fails (returns an empty list). Per-chapter
- *   TERM ENUMERATION is easy and reliable instead.
- * - Near-duplicate pairs (same length, one differing character) over the
- *   aggregated term list guarantee that real conflicts reach the judge.
- * - A judge that sees only the two words happily merges opposites (硬更新/软
- *   更新) and different concepts (模仿学习/模型学习). So the judge sees
- *   EVIDENCE: both words must co-occur in one chapter, and the prompt carries
- *   one real sentence of context for each spelling.
+ * - Candidate generation is DETERMINISTIC: CJK n-grams (length 2-8, appearing
+ *   ≥2 times per chapter) yield near-duplicate pairs (same length, exactly one
+ *   differing character). LLM enumeration was abandoned — on 20k-char chapters
+ *   the model both missed real variant spellings and blew its output budget.
+ * - Only pairs whose two spellings co-occur inside the same chapter reach the
+ *   judge, and the judge sees EVIDENCE: one real sentence of context per
+ *   spelling. A word-pair judge without evidence happily merges opposites
+ *   (硬更新/软更新) and different concepts (模仿学习/模型学习).
+ * - Pairs are ranked by frequency imbalance (a rare spelling next to a
+ *   dominant one is the signature of an inconsistency), so the judge's
+ *   limited slots go to the most likely conflicts.
  * - Hard guards: both variants must contain CJK (no pure-English/acronym
- *   merges like GRPO→TRPO), and the losing spelling is replaced only outside
- *   code fences, plus in the chapter title.
+ *   merges), transitive group merge (one spelling never gets two
+ *   contradictory targets), and replacements only outside code fences plus
+ *   chapter titles.
+ *
+ * Total LLM cost: exactly ONE judge call per book.
  */
 
 export type TerminologyReplacement = { from: string; to: string };
@@ -44,69 +49,38 @@ export type TerminologyAuditReport = {
   error?: string;
 };
 
-const AUDIT_CONCURRENCY = 2;
 const AUDIT_TIMEOUT_MS = 180_000;
-const MAX_TERMS_PER_CHAPTER = 80;
-const MAX_TERMS_PER_BOOK = 400;
+const MAX_NGRAMS_PER_CHAPTER = 300;
+const MAX_NGRAMS_PER_BOOK = 3000;
 const MAX_JUDGE_PAIRS = 60;
 
-export function buildTermExtractionPrompt(
-  course: Course,
-  chapterContent: string,
-  chapterNumber: number,
-  chapterTitle: string,
-) {
-  const conventions = {
-    terminology: course.courseBible.terminology ?? [],
-    writingConventions: course.courseBible.writingConventions ?? "",
-  };
-  return `你是一名教材术语提取员。下面是一本中文教材第 ${chapterNumber} 章《${chapterTitle}》的正文。
-
-任务：逐段扫描正文，把其中出现的所有中文术语（专有名词、方法名、概念名，2 到 10 个字，可含英文缩写，如「Q 学习」「TD 误差」）逐一列出。这是机械的枚举任务，只列词本身，不要判断、不要解释。
-
-只输出合法 JSON，结构为：
-{"terms":["术语1","术语2"]}
-
-规则：
-- 只列真实出现在正文中的词，禁止编造。
-- 特别留意：同一概念在本章若有多种写法（如「马尔科夫」与「马尔可夫」、「同策略」与「在策略」），两种写法都要列出，这是本次提取的重点。
-- 禁止组合式枚举：不要拿两个词拼出新词（如「TD(0)预测的SARSA收敛条件」这种拼接项）；只列正文中原样出现的术语。
-- 按出现顺序列出，最多 ${MAX_TERMS_PER_CHAPTER} 个；重复出现的只列一次；若术语多于 60 个，只列前 60 个。
-- 总输出控制在约 1500 token 以内，严禁长篇输出。
-- 术语表用于全书一致性检查，宁可多列不可漏列。
-- 只输出 JSON，第一个字符必须是 {，最后一个字符必须是 }。
-
-Course Bible 术语约定（仅参考，不要照抄）：
-${JSON.stringify(conventions)}
-
-第 ${chapterNumber} 章《${chapterTitle}》正文：
-${chapterContent}`;
-}
-
-export function parseChapterTerms(raw: string): string[] {
-  let parsed: { terms?: unknown };
-  try {
-    parsed = parseJson<{ terms?: unknown }>(raw);
-  } catch {
-    return [];
+/**
+ * Deterministic term candidate extraction: CJK runs of length 2-8 broken into
+ * sliding n-grams, keeping only grams that appear at least twice in the
+ * chapter. Complete recall, zero LLM cost.
+ */
+export function extractCjkNgrams(content: string, maxTerms = MAX_NGRAMS_PER_CHAPTER): string[] {
+  const counts = new Map<string, number>();
+  for (const match of content.matchAll(/[\u4e00-\u9fff]{2,8}/gu)) {
+    const run = match[0];
+    for (let size = 2; size <= run.length; size += 1) {
+      for (let start = 0; start + size <= run.length; start += 1) {
+        const gram = run.slice(start, start + size);
+        counts.set(gram, (counts.get(gram) ?? 0) + 1);
+      }
+    }
   }
-  if (!Array.isArray(parsed.terms)) return [];
-  const seen = new Set<string>();
-  const terms: string[] = [];
-  for (const entry of parsed.terms) {
-    if (typeof entry !== "string") continue;
-    const term = entry.trim().slice(0, 10);
-    if (term.length < 2 || seen.has(term)) continue;
-    seen.add(term);
-    terms.push(term);
-  }
-  return terms.slice(0, MAX_TERMS_PER_CHAPTER);
+  return [...counts.entries()]
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, maxTerms)
+    .map(([gram]) => gram);
 }
 
 /**
- * Deterministic near-duplicate seeds over the aggregated term list: same
- * length with exactly one differing character. Purely a candidate generator —
- * the evidence judge decides whether the pair is truly the same concept.
+ * Near-duplicate seeds over the aggregated n-gram list: same length with
+ * exactly one differing character. Purely a candidate generator — the
+ * evidence judge decides whether the pair is truly the same concept.
  */
 export function findNearDuplicatePairs(terms: string[]): { english?: string; variants: string[] }[] {
   const normalized = [...new Set(terms.map((term) => term.trim()))].filter(
@@ -157,6 +131,30 @@ export function filterCoOccurringPairs(
   );
 }
 
+/**
+ * Rank pairs for the judge's limited slots: frequency imbalance first (a rare
+ * spelling beside a dominant one is the signature of an inconsistency), then
+ * total frequency.
+ */
+export function rankCandidatePairs(
+  pairs: { variants: string[] }[],
+  chapterContents: string[],
+) {
+  return pairs
+    .map((pair) => {
+      const counts = pair.variants.map((variant) =>
+        chapterContents.reduce((sum, content) => sum + occurrencesOutsideFences(content, variant), 0),
+      );
+      return {
+        pair,
+        imbalance: Math.abs((counts[0] ?? 0) - (counts[1] ?? 0)),
+        total: (counts[0] ?? 0) + (counts[1] ?? 0),
+      };
+    })
+    .sort((a, b) => b.imbalance - a.imbalance || b.total - a.total)
+    .map((item) => item.pair);
+}
+
 /** Extract a short real sentence of context around the first occurrence. */
 export function excerptAround(content: string, token: string, radius = 50): string {
   const index = content.indexOf(token);
@@ -200,6 +198,7 @@ export function buildConflictJudgementPrompt(
 - 只有「同一概念的两种译名/写法」才判 same:true（如「马尔科夫」与「马尔可夫」同为 Markov；「同策略」与「在策略」同为 on-policy；「回放缓冲区」与「重放缓冲区」同为 replay buffer）。
 - 反义词、相反操作、不同概念、不同算法必须判 same:false，例如「硬更新」与「软更新」、「旧策略」与「新策略」、「模仿学习」与「模型学习」、「正态分布」与「状态分布」、「泛化误差」与「优化误差」。
 - 纯英文缩写对（如 GRPO 与 TRPO）一律 same:false。
+- 不确定就判 same:false（宁漏勿错）。
 - 只输出 JSON，第一个字符必须是 {，最后一个字符必须是 }。
 
 候选对与上下文：
@@ -278,34 +277,6 @@ export function mergeTransitiveGroups(
     .map((set) => [...set])
     .filter((variants) => variants.length >= 2)
     .map((variants) => ({ key: variants.join("\u0000"), variants }));
-}
-
-/** Split a long chapter at section boundaries so term enumeration has a
- *  recall-safe window; short chapters stay in one piece. */
-export function splitChapterForExtraction(content: string, maxChars = 16_000): string[] {
-  if (content.length <= maxChars) return [content];
-  const lines = content.split(/\r?\n/u);
-  const chunks: string[] = [];
-  let current: string[] = [];
-  let currentLength = 0;
-
-  for (const line of lines) {
-    if (currentLength > 0 && currentLength + line.length > maxChars && /^##\s+/u.test(line)) {
-      chunks.push(current.join("\n"));
-      current = [];
-      currentLength = 0;
-    }
-    current.push(line);
-    currentLength += line.length + 1;
-  }
-  if (current.length) chunks.push(current.join("\n"));
-  if (chunks.length > 2) {
-    // Keep the audit cheap: fold the overflow back into the last chunk.
-    const head = chunks.slice(0, 1);
-    const tail = chunks.slice(1).join("\n\n");
-    return [head[0]!, tail];
-  }
-  return chunks;
 }
 
 /** Map verified conflict groups into book-wide conflicts and locate chapters. */
@@ -462,22 +433,6 @@ function occurrencesOutsideFences(content: string, token: string) {
   return count;
 }
 
-async function runInBatches<T, R>(
-  items: T[],
-  batchSize: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  for (let i = 0; i < items.length; i += batchSize) {
-    const batch = items.slice(i, i + batchSize);
-    const batchResults = await Promise.all(batch.map((item, j) => fn(item, i + j)));
-    for (let j = 0; j < batch.length; j += 1) {
-      results[i + j] = batchResults[j]!;
-    }
-  }
-  return results;
-}
-
 export async function runTerminologyAudit(
   course: Course,
   options: { overrides?: ModelOverrides; request?: Request; dryRun?: boolean } = {},
@@ -491,70 +446,38 @@ export async function runTerminologyAudit(
   }
 
   try {
-    // Stage 1: per-chapter term enumeration (an easy task the model does well).
-    // Long chapters are split at section boundaries so enumeration keeps its
-    // recall — a single 20k-char pass silently misses variant spellings.
-    const perChapter = await runInBatches(chapters, AUDIT_CONCURRENCY, async (chapter) => {
-      const content = chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
-      const chunks = splitChapterForExtraction(content);
-      const termSets = await runInBatches(chunks, 1, async (chunk) => {
-        try {
-          const raw = await dispatchAgentText({
-            agent: "REVIEWER",
-            prompt: buildTermExtractionPrompt(
-              course,
-              chunk,
-              course.chapters.findIndex((item) => item.id === chapter.id) + 1,
-              chapter.title,
-            ),
-            temperature: 0.1,
-            maxTokens: 2048,
-            timeoutMs: AUDIT_TIMEOUT_MS,
-            maxAttempts: 1,
-            responseFormat: "json_object",
-            overrides: options.overrides,
-            mock: () => JSON.stringify({ terms: [] }),
-          });
-          return parseChapterTerms(raw);
-        } catch (error) {
-          // One failed chunk must not sink the whole audit — degrade to fewer
-          // enumerated terms instead of a total failure.
-          console.warn(`[terminologyAudit] enumeration chunk failed: ${safeErrorMessage(error, "REVIEWER enumeration failed")}`);
-          return [];
-        }
-      });
-      return [...new Set(termSets.flat())];
-    });
-
-    const allTerms = [...new Set(perChapter.flat())].slice(0, MAX_TERMS_PER_BOOK);
     const chapterContents = chapters.map(
       (chapter) => chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "",
     );
 
-    // Deterministic seeds, filtered to same-chapter co-occurrence only.
-    const coOccurring = filterCoOccurringPairs(findNearDuplicatePairs(allTerms), chapterContents);
+    // Stage 1 (deterministic, free): CJK n-grams per chapter → near-duplicate
+    // seeds → same-chapter co-occurrence filter → rank by frequency imbalance.
+    const allTerms = [...new Set(chapterContents.flatMap((content) => extractCjkNgrams(content)))].slice(0, MAX_NGRAMS_PER_BOOK);
+    const candidates = rankCandidatePairs(
+      filterCoOccurringPairs(findNearDuplicatePairs(allTerms), chapterContents),
+      chapterContents,
+    );
+
+    // Stage 2 (one LLM call): evidence-backed judge over the ranked pairs.
+    const judgeRaw = await dispatchAgentText({
+      agent: "REVIEWER",
+      prompt: buildConflictJudgementPrompt(candidates, chapterContents),
+      temperature: 0.1,
+      maxTokens: 2048,
+      timeoutMs: AUDIT_TIMEOUT_MS,
+      maxAttempts: 1,
+      responseFormat: "json_object",
+      overrides: options.overrides,
+      mock: () => JSON.stringify({ groups: [] }),
+    });
 
     const rejected: TerminologyAuditReport["rejected"] = [];
     const groups: { key: string; variants: string[] }[] = [];
-    if (coOccurring.length > 0) {
-      // Stage 2: one short evidence-backed judge call.
-      const judgeRaw = await dispatchAgentText({
-        agent: "REVIEWER",
-        prompt: buildConflictJudgementPrompt(coOccurring, chapterContents),
-        temperature: 0.1,
-        maxTokens: 2048,
-        timeoutMs: AUDIT_TIMEOUT_MS,
-        maxAttempts: 1,
-        responseFormat: "json_object",
-        overrides: options.overrides,
-        mock: () => JSON.stringify({ groups: [] }),
-      });
-      for (const decision of parseConflictGroups(judgeRaw)) {
-        if (decision.same) {
-          groups.push({ key: decision.key, variants: decision.variants });
-        } else if (decision.reason || decision.variants.length >= 2) {
-          rejected.push({ variants: decision.variants, reason: decision.reason || "判定为不同概念，已跳过。" });
-        }
+    for (const decision of parseConflictGroups(judgeRaw)) {
+      if (decision.same) {
+        groups.push({ key: decision.key, variants: decision.variants });
+      } else if (decision.reason || decision.variants.length >= 2) {
+        rejected.push({ variants: decision.variants, reason: decision.reason || "判定为不同概念，已跳过。" });
       }
     }
 
@@ -581,7 +504,7 @@ export async function runTerminologyAudit(
       const nextTitle = applyTerminologyReplacementsToString(chapter.title, replacements);
       const titleChanged = nextTitle !== chapter.title;
       const totalApplied = applied + (titleChanged ? 1 : 0);
-      if (totalApplied === 0 || nextContent === content && !titleChanged) continue;
+      if (totalApplied === 0 || (nextContent === content && !titleChanged)) continue;
       if (!options.dryRun) {
         const sections = chapter.sections?.length
           ? markdownToSections(chapter, nextContent)

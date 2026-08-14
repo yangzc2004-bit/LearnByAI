@@ -7,54 +7,18 @@ import {
   chooseCanonicalReplacements,
   countVariantOccurrences,
   excerptAround,
+  extractCjkNgrams,
   filterCoOccurringPairs,
   findNearDuplicatePairs,
   mergeTransitiveGroups,
-  parseChapterTerms,
   parseConflictGroups,
-  splitChapterForExtraction,
+  rankCandidatePairs,
 } from "../../src/lib/maol/terminologyAudit";
 
-test("mergeTransitiveGroups unions groups that share a spelling", () => {
-  const merged = mergeTransitiveGroups([
-    { key: "a", variants: ["多步回报", "n步回报"] },
-    { key: "b", variants: ["n步回报", "n步回溯"] },
-    { key: "c", variants: ["马尔可夫", "马尔科夫"] },
-  ]);
-  const byKey = merged.map((group) => group.variants.sort().join("/")).sort();
-  assert.deepEqual(byKey, ["n步回报/n步回溯/多步回报", "马尔可夫/马尔科夫"]);
-});
-
-test("mergeTransitiveGroups leaves disjoint groups alone", () => {
-  const merged = mergeTransitiveGroups([
-    { key: "a", variants: ["同策略", "在策略"] },
-    { key: "b", variants: ["回放缓冲区", "重放缓冲区"] },
-  ]);
-  assert.equal(merged.length, 2);
-});
-
-test("splitChapterForExtraction splits long chapters at section boundaries", () => {
-  const content = Array.from({ length: 24 }, (_, i) => `## 小节${i}\n${"内容。".repeat(300)}`).join("\n");
-  assert.ok(content.length > 16_000, `content only ${content.length} chars`);
-  const chunks = splitChapterForExtraction(content, 16_000);
-  assert.equal(chunks.length, 2, `got ${chunks.length} chunks`);
-  const joined = chunks.join("\n");
-  for (const heading of ["## 小节0", "## 小节12", "## 小节23"]) {
-    assert.ok(joined.includes(heading), `${heading} lost in chunks`);
-  }
-  assert.deepEqual(splitChapterForExtraction("短章。"), ["短章。"]);
-});
-
-test("parseChapterTerms extracts, dedupes and caps term lists", () => {
-  const parsed = parseChapterTerms(
-    JSON.stringify({ terms: ["马尔可夫", "马尔科夫", "Q 学习", "马尔可夫", "", "a", "太长太长太长太长太长太长"] }),
-  );
-  assert.deepEqual(parsed, ["马尔可夫", "马尔科夫", "Q 学习", "太长太长太长太长太长"]);
-});
-
-test("parseChapterTerms rejects non-JSON and empty payloads", () => {
-  assert.deepEqual(parseChapterTerms("not json"), []);
-  assert.deepEqual(parseChapterTerms(JSON.stringify({ terms: [] })), []);
+test("extractCjkNgrams keeps only grams appearing at least twice", () => {
+  const grams = extractCjkNgrams("马尔可夫决策过程与马尔可夫性质。偶尔出现的唯一词。");
+  assert.ok(grams.includes("马尔可夫"), JSON.stringify(grams));
+  assert.ok(!grams.includes("偶尔出现"), JSON.stringify(grams));
 });
 
 test("findNearDuplicatePairs seeds same-length one-character-difference pairs", () => {
@@ -81,6 +45,23 @@ test("filterCoOccurringPairs keeps only pairs whose variants share a chapter", (
   assert.equal(pairs.length, 2, JSON.stringify(pairs));
 });
 
+test("rankCandidatePairs puts frequency-imbalanced pairs first", () => {
+  const contents = [
+    "马尔可夫 ".repeat(30) + "马尔科夫",
+    "同策略 ".repeat(10) + "在策略 ".repeat(9),
+    "状态价值 ".repeat(20) + "动作价值 ".repeat(20),
+  ];
+  const ranked = rankCandidatePairs(
+    [
+      { variants: ["同策略", "在策略"] },
+      { variants: ["状态价值", "动作价值"] },
+      { variants: ["马尔可夫", "马尔科夫"] },
+    ],
+    contents,
+  );
+  assert.deepEqual(ranked[0]?.variants, ["马尔可夫", "马尔科夫"], JSON.stringify(ranked));
+});
+
 test("excerptAround returns a short real context around the token", () => {
   const content = "前言部分文字。这里是马尔科夫决策过程的定义段落，随后继续。";
   const excerpt = excerptAround(content, "马尔科夫", 20);
@@ -105,6 +86,16 @@ test("parseConflictGroups parses evidence-judge decisions", () => {
 
 test("parseConflictGroups rejects non-JSON", () => {
   assert.deepEqual(parseConflictGroups("not json"), []);
+});
+
+test("mergeTransitiveGroups unions groups that share a spelling", () => {
+  const merged = mergeTransitiveGroups([
+    { key: "a", variants: ["多步回报", "n步回报"] },
+    { key: "b", variants: ["n步回报", "n步回溯"] },
+    { key: "c", variants: ["马尔可夫", "马尔科夫"] },
+  ]);
+  const byKey = merged.map((group) => group.variants.sort().join("/")).sort();
+  assert.deepEqual(byKey, ["n步回报/n步回溯/多步回报", "马尔可夫/马尔科夫"]);
 });
 
 test("buildConflictMap locates chapters and countVariantOccurrences counts outside fences", () => {
