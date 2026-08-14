@@ -22,7 +22,7 @@ test("generation runner queues answers as a separate background job after ready"
   // The background runner never patches status/content directly — the only
   // write path is the atomic hash-guarded answers write in the store.
   const storeSrc = readFileSync("src/lib/serverStore.ts", "utf8");
-  assert.ok(storeSrc.includes("{ ...item, exerciseAnswers }"), "store must only write exerciseAnswers");
+  assert.ok(storeSrc.includes("exerciseAnswers, exerciseAnswersSourceContentHash: expectedContentHash"), "store must only write exerciseAnswers (with source hash)");
   assert.match(storeSrc, /updateChapterAnswersIfContentHashMatches/u);
   // Content-fingerprint anchoring: the job is pinned to the chapter version
   // it was queued for, and stale jobs are superseded instead of written.

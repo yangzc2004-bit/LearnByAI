@@ -137,6 +137,40 @@ test("runner supersedes a stale answer job and a retry re-anchors to the current
   assert.equal(afterRetry?.chapters[0]?.content, bodyA);
 });
 
+test("answers are cleared when the chapter body is regenerated afterwards (reverse race)", async () => {
+  const { store } = await loadModules();
+  const bodyA = "## 练习\n1. 旧版题目\n正文。";
+  await store.saveServerCourse(makeCourse(bodyA));
+
+  const answers: ExerciseAnswer[] = [{ questionIndex: 1, answer: "旧版题目的解答。" }];
+  const written = await store.updateChapterAnswersIfContentHashMatches(COURSE_ID, CHAPTER_ID, sha256(bodyA), answers);
+  assert.equal(written.applied, true);
+
+  // The chapter is regenerated AFTER the answers landed: the new body must
+  // never ship with answers generated from the old one.
+  const bodyB = "## 练习\n1. 重新生成后的新题目\n正文已更新。";
+  await store.updateServerChapter(makeCourse(bodyA), CHAPTER_ID, { content: bodyB, sections: undefined });
+
+  const reloaded = await store.getServerCourse(COURSE_ID);
+  assert.equal(reloaded?.chapters[0]?.content, bodyB);
+  assert.equal(reloaded?.chapters[0]?.exerciseAnswers, undefined, "old answers must be invalidated");
+  assert.equal(reloaded?.chapters[0]?.exerciseAnswersSourceContentHash, undefined);
+});
+
+test("read-time guard drops answers whose source hash no longer matches", async () => {
+  const { store } = await loadModules();
+  const bodyB = "## 练习\n1. 当前题目\n正文。";
+  // Seed a course whose stored answers were generated from an older body —
+  // simulating a write path that bypassed the write-side clear entirely.
+  const course = makeCourse(bodyB);
+  course.chapters[0]!.exerciseAnswers = [{ questionIndex: 1, answer: "旧版解答。" }];
+  course.chapters[0]!.exerciseAnswersSourceContentHash = sha256("旧版正文");
+  await store.saveServerCourse(course);
+
+  const reloaded = await store.getServerCourse(COURSE_ID);
+  assert.equal(reloaded?.chapters[0]?.content, bodyB);
+  assert.equal(reloaded?.chapters[0]?.exerciseAnswers, undefined, "read path must drop stale answers");
+});
 test("provider failure fails only the answer job and leaves the chapter untouched", async () => {
   const { store, runner, jobs } = await loadModules();
   const previousKey = process.env.AI_API_KEY;

@@ -160,6 +160,27 @@ export async function saveServerCourse(course: Course, request?: Request) {
   return publishSavedCourse(nextCourse);
 }
 
+/**
+ * Defense in depth: drop answers whose recorded source fingerprint no
+ * longer matches the chapter body (a regeneration may have bypassed the
+ * write-side clear). Chapters without the fingerprint are left untouched.
+ */
+function dropStaleExerciseAnswers(course: Course): Course {
+  let changed = false;
+  const chapters = course.chapters.map((chapter) => {
+    const stale = Boolean(chapter.exerciseAnswers?.length) &&
+      Boolean(chapter.exerciseAnswersSourceContentHash) &&
+      hashChapterContent(getChapterBody(chapter)) !== chapter.exerciseAnswersSourceContentHash;
+    if (!stale) return chapter;
+    changed = true;
+    const next = { ...chapter };
+    delete next.exerciseAnswers;
+    delete next.exerciseAnswersSourceContentHash;
+    return next;
+  });
+  return changed ? { ...course, chapters } : course;
+}
+
 export async function getServerCourse(id: string, request?: Request) {
   const userId = await resolveUserId(request);
   const supabase = createSupabaseServiceClient();
@@ -173,7 +194,7 @@ export async function getServerCourse(id: string, request?: Request) {
       .maybeSingle();
 
     assertSupabaseNoError("Read course", error);
-    if (data?.payload) return normalizeCourse(data.payload as Course);
+    if (data?.payload) return dropStaleExerciseAnswers(normalizeCourse(data.payload as Course));
     return undefined;
   }
 
@@ -181,7 +202,7 @@ export async function getServerCourse(id: string, request?: Request) {
   const hydratedCourse = localCourses.get(id);
   if (!hydratedCourse) return undefined;
   const visible = hydratedCourse.userId === userId || userId === "local-beta-user";
-  return visible ? normalizeCourse(hydratedCourse) : undefined;
+  return visible ? dropStaleExerciseAnswers(normalizeCourse(hydratedCourse)) : undefined;
 }
 
 /**
@@ -200,12 +221,12 @@ export async function getServerCourseForRender(id: string) {
       .maybeSingle();
 
     assertSupabaseNoError("Read course for render", error);
-    return data?.payload ? normalizeCourse(data.payload as Course) : undefined;
+    return data?.payload ? dropStaleExerciseAnswers(normalizeCourse(data.payload as Course)) : undefined;
   }
 
   await hydrateLocalStore();
   const local = localCourses.get(id);
-  return local ? normalizeCourse(local) : undefined;
+  return local ? dropStaleExerciseAnswers(normalizeCourse(local)) : undefined;
 }
 
 type CourseSummaryRow = {
@@ -453,9 +474,24 @@ export async function updateServerChapter(
     // snapshot. Re-read inside the short persistence lock so one chapter
     // update cannot overwrite another chapter that finished moments earlier.
     const latestCourse = await getServerCourse(course.id, request) ?? course;
-    const chapters = latestCourse.chapters.map((chapter) =>
-      chapter.id === chapterId ? { ...chapter, ...patch } : chapter,
-    );
+    const bodyPatchTouchesBody = "content" in patch || "sections" in patch;
+    const chapters = latestCourse.chapters.map((chapter) => {
+      if (chapter.id !== chapterId) return chapter;
+      const next = { ...chapter, ...patch };
+      // Reverse race guard: answers generated from the OLD body must not
+      // survive a regeneration of the body. Only a patch that explicitly
+      // carries exerciseAnswers may keep them.
+      if (
+        bodyPatchTouchesBody &&
+        !("exerciseAnswers" in patch) &&
+        (next.exerciseAnswers?.length || next.exerciseAnswersSourceContentHash) &&
+        hashChapterContent(getChapterBody(next)) !== hashChapterContent(getChapterBody(chapter))
+      ) {
+        delete next.exerciseAnswers;
+        delete next.exerciseAnswersSourceContentHash;
+      }
+      return next;
+    });
     return saveServerChapterUpdate({ ...latestCourse, chapters }, chapterId, request);
   });
 }
@@ -489,7 +525,9 @@ export async function updateChapterAnswersIfContentHashMatches(
       {
         ...latestCourse,
         chapters: latestCourse.chapters.map((item) =>
-          item.id === chapterId ? { ...item, exerciseAnswers } : item,
+          item.id === chapterId
+            ? { ...item, exerciseAnswers, exerciseAnswersSourceContentHash: expectedContentHash }
+            : item,
         ),
       },
       chapterId,
