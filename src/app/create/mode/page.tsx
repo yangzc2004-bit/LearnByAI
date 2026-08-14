@@ -36,7 +36,7 @@ export default function CreateModePage() {
             <ul className="space-y-2 text-sm text-muted-foreground">
               <li className="flex gap-2"><Timer size={15} className="mt-0.5 shrink-0" /> 生成更快、篇幅更短，适合入门、复习和快速了解领域。</li>
               <li className="flex gap-2"><BookOpen size={15} className="mt-0.5 shrink-0" /> 保留课程与章节结构，可导出讲义 PDF 与 TeX。</li>
-              <li className="flex gap-2"><GraduationCap size={15} className="mt-0.5 shrink-0" /> 章节按"问题导入 → 核心讲解 → 典型例子 → 要点整理 → 练习"组织。</li>
+              <li className="flex gap-2"><GraduationCap size={15} className="mt-0.5 shrink-0" /> 章节按{"\u201c"}问题导入 → 核心讲解 → 典型例子 → 要点整理 → 练习{"\u201d"}组织。</li>
             </ul>
           </Link>
 

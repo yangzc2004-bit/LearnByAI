@@ -3,6 +3,7 @@ import { requireApiUser } from "@/lib/apiAuth";
 import { getServerCourse, getServerLectureProgress, saveServerLectureProgress } from "@/lib/serverStore";
 import { CompanionProgress } from "@/lib/types";
 import { safeErrorMessage } from "@/lib/safeError";
+import { validateQuizSubmission } from "@/lib/companionProgressValidation";
 
 /**
  * Per-chapter companion-guide (AI 伴学指南) learning progress: completion
@@ -58,22 +59,16 @@ export async function POST(
   const existing = await getServerLectureProgress(id, request);
   const quizScore = normalizeScore(body.quizScore);
   const quizTotal = normalizeScore(body.quizTotal);
-  const effectiveTotal = quizTotal ?? existing?.quizTotal;
 
   // 越界/一致性校验（伴学计划 P0）：分数不能超过题数，题数必须等于当前小测题数。
-  if (quizScore !== undefined || quizTotal !== undefined) {
-    if (questionCount === 0) {
-      return NextResponse.json({ error: "当前章节还没有小测，无法提交成绩。" }, { status: 400 });
-    }
-    if (effectiveTotal === undefined) {
-      return NextResponse.json({ error: "缺少 quizTotal，无法校验成绩。" }, { status: 400 });
-    }
-    if (quizTotal !== undefined && quizTotal !== questionCount) {
-      return NextResponse.json({ error: `quizTotal 必须等于当前小测题数（${questionCount}）。` }, { status: 400 });
-    }
-    if (quizScore !== undefined && quizScore > effectiveTotal) {
-      return NextResponse.json({ error: "quizScore 不能大于 quizTotal。" }, { status: 400 });
-    }
+  const validation = validateQuizSubmission({
+    questionCount,
+    quizScore,
+    quizTotal,
+    existingQuizTotal: existing?.quizTotal,
+  });
+  if (!validation.ok) {
+    return NextResponse.json({ error: validation.error }, { status: 400 });
   }
 
   const bestScore = Math.max(
