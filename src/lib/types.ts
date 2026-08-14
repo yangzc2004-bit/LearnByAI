@@ -46,7 +46,7 @@ export type ExerciseAnswer = {
   answer: string;
 };
 
-export type LectureQuizQuestion = {
+export type CompanionQuizQuestion = {
   question: string;
   options: string[];
   /** 0-based index of the correct option. */
@@ -54,19 +54,26 @@ export type LectureQuizQuestion = {
   explanation: string;
 };
 
-export type LectureSelfCheck = {
+/** @deprecated Renamed to CompanionQuizQuestion; kept for one release cycle. */
+export type LectureQuizQuestion = CompanionQuizQuestion;
+
+export type CompanionSelfCheck = {
   question: string;
   answer: string;
 };
 
+/** @deprecated Renamed to CompanionSelfCheck; kept for one release cycle. */
+export type LectureSelfCheck = CompanionSelfCheck;
+
 /**
- * One building block of the lecture (讲义) view. The lecture is a condensed,
- * 15-20 minute self-study pass over an existing textbook chapter: an opening
- * review, a sequence of teach blocks (intuition → concept → minimal example,
- * anchored back to a textbook section), a 3-point recap, and a next-lecture
- * preview.
+ * One building block of the companion guide (AI 伴学指南). The guide is a
+ * condensed, 15-20 minute self-study pass over an existing chapter: an
+ * opening review, a sequence of teach blocks (intuition → concept → minimal
+ * example, anchored back to the source section), a 3-point recap, and a
+ * next-guide preview. The guide is an interactive learning layer and never
+ * becomes part of the chapter body or its PDF/TeX export.
  */
-export type LectureBlock =
+export type CompanionBlock =
   | { kind: "review"; text: string }
   | {
       kind: "teach";
@@ -74,36 +81,43 @@ export type LectureBlock =
       intuition: string;
       concept: string;
       example: string;
-      /** Textbook section number this block condenses, e.g. "3.2" — the reader
-       *  uses it to jump back to the corresponding textbook section. */
+      /** Source section number this block condenses, e.g. "3.2" — the reader
+       *  uses it to jump back to the source text. */
       anchorSection?: string;
     }
   | { kind: "recap"; points: string[] }
   | { kind: "preview"; text: string };
 
+/** @deprecated Renamed to CompanionBlock; kept for one release cycle. */
+export type LectureBlock = CompanionBlock;
+
 /**
- * The lecture view attached to a textbook chapter. Generated on demand by a
- * dedicated pass that condenses the chapter body under the Course Bible's
- * terminology/notation rules — never re-planned, never a separate course.
+ * The companion guide (AI 伴学指南) attached to a chapter. Generated on
+ * demand as an interactive self-study layer over the chapter source text
+ * (textbook or lecture course). It never becomes part of the textbook or
+ * lecture PDF, TeX, or the published chapter body.
  */
-export type ChapterLecture = {
+export type CompanionGuide = {
   status: "queued" | "generating" | "ready" | "failed";
   learningObjectives?: string[];
-  blocks?: LectureBlock[];
-  selfCheck?: LectureSelfCheck[];
-  finalQuiz?: LectureQuizQuestion[];
-  error?: string;
+  blocks?: CompanionBlock[];
+  selfCheck?: CompanionSelfCheck[];
+  finalQuiz?: CompanionQuizQuestion[];
   generatedAt?: string;
-  /** Content hash of the chapter body this lecture was condensed from. */
+  error?: string;
+  /** Content hash of the chapter body this guide was generated from. */
   sourceContentHash?: string;
 };
 
+/** @deprecated Renamed to CompanionGuide; kept for one release cycle. */
+export type ChapterLecture = CompanionGuide;
+
 /**
- * Per-user learning progress for a chapter's lecture view: completion
- * checkmark + latest/best final-quiz scores. Stored server-side so the course
- * page can show which chapters have been learned.
+ * Per-user learning progress for a chapter's companion guide: completion
+ * checkmark + latest and best final-quiz scores. Stored server-side keyed by
+ * (user, chapter).
  */
-export type LectureProgress = {
+export type CompanionProgress = {
   id: string;
   userId?: string;
   courseId: string;
@@ -114,6 +128,9 @@ export type LectureProgress = {
   bestScore?: number;
   updatedAt: string;
 };
+
+/** @deprecated Renamed to CompanionProgress; kept for one release cycle. */
+export type LectureProgress = CompanionProgress;
 
 export type Chapter = {
   id: string;
@@ -138,8 +155,14 @@ export type Chapter = {
   /** SHA-256 of the chapter body these answers were generated from. Stale
    *  answers (body regenerated afterwards) are dropped on write AND on read. */
   exerciseAnswersSourceContentHash?: string;
-  /** Condensed self-study lecture view (讲义) of this textbook chapter,
-   *  generated on demand by the lecture pass. */
+  /**
+   * AI 伴学指南 (companion guide) of this chapter, generated on demand as an
+   * interactive self-study layer over the source text. It never becomes part
+   * of the textbook/lecture PDF, TeX, or the published chapter body.
+   */
+  companionGuide?: CompanionGuide;
+  /** @deprecated Migrated to companionGuide; kept for one release cycle so legacy
+   *  stored payloads and old clients keep round-tripping. */
   lecture?: ChapterLecture;
 };
 

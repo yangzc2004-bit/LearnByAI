@@ -62,8 +62,14 @@ export function normalizeCourse(raw: Course): Course {
 }
 
 function normalizeChapter(chapter: Chapter): Chapter {
+  // Legacy compat: payloads written before the companion-guide rename store
+  // the guide under the deprecated `lecture` key. Map it onto the canonical
+  // `companionGuide` field and mirror the deprecated field so legacy readers
+  // keep working for one release cycle.
+  const guide = chapter.companionGuide ?? chapter.lecture;
   return {
     ...chapter,
     depthWeight: chapter.depthWeight ?? "normal",
+    ...(guide ? { companionGuide: guide, lecture: guide } : {}),
   };
 }

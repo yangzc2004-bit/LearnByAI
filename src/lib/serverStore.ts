@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { claimGenerationJob, deleteGenerationJobsForCourse, patchGenerationJob, releaseGenerationJob, upsertGenerationJob } from "./jobs";
 import { publishCourseChanged, publishGenerationJobChanged } from "./courseEvents";
 import { getChapterBody, hashChapterContent } from "./chapterContent";
-import { Annotation, Course, ExerciseAnswer, ExportJob, GenerationJob, LectureProgress, QualityReport, Revision, UsageEvent } from "./types";
+import { Annotation, Chapter, CompanionGuide, Course, ExerciseAnswer, ExportJob, GenerationJob, LectureProgress, QualityReport, Revision, UsageEvent } from "./types";
 import { normalizeCourse } from "./normalizeCourse";
 import { createSupabaseServiceClient, resolveUserId } from "./supabase/server";
 
@@ -71,7 +71,7 @@ export async function saveServerCourse(course: Course, request?: Request) {
       user_id: userId,
       topic: nextCourse.topic,
       goal: nextCourse.goal,
-      payload: nextCourse,
+      payload: canonicalizeCourseForStorage(nextCourse),
       created_at: nextCourse.createdAt,
       updated_at: nextCourse.updatedAt,
     }),
@@ -100,7 +100,7 @@ export async function saveServerCourse(course: Course, request?: Request) {
             title: chapter.title,
             status: chapter.status ?? "pending",
             order_index: index,
-            payload: chapter,
+            payload: canonicalizeChapterForStorage(chapter),
             updated_at: nextCourse.updatedAt,
           }),
         ),
@@ -181,6 +181,37 @@ function dropStaleExerciseAnswers(course: Course): Course {
   return changed ? { ...course, chapters } : course;
 }
 
+/**
+ * Defense in depth: hide a companion guide whose recorded source fingerprint
+ * no longer matches the chapter body (a regeneration may have bypassed the
+ * write-side clear). Guides without a fingerprint are left untouched, and
+ * the deprecated `lecture` mirror is hidden together with it.
+ */
+function dropStaleCompanionGuide(course: Course): Course {
+  let changed = false;
+  const chapters = course.chapters.map((chapter) => {
+    const guide = chapter.companionGuide ?? chapter.lecture;
+    const stale = Boolean(guide?.sourceContentHash) &&
+      hashChapterContent(getChapterBody(chapter)) !== guide.sourceContentHash;
+    if (!stale) return chapter;
+    changed = true;
+    const next = { ...chapter };
+    delete next.companionGuide;
+    delete next.lecture;
+    return next;
+  });
+  return changed ? { ...course, chapters } : course;
+}
+
+/**
+ * Single funnel for course payloads read from persistence: shape
+ * normalization plus the stale-derivative guards (exercise answers,
+ * companion guide). Every course read path must go through here.
+ */
+function normalizeCourseRead(raw: Course): Course {
+  return dropStaleCompanionGuide(dropStaleExerciseAnswers(normalizeCourse(raw)));
+}
+
 export async function getServerCourse(id: string, request?: Request) {
   const userId = await resolveUserId(request);
   const supabase = createSupabaseServiceClient();
@@ -194,7 +225,7 @@ export async function getServerCourse(id: string, request?: Request) {
       .maybeSingle();
 
     assertSupabaseNoError("Read course", error);
-    if (data?.payload) return dropStaleExerciseAnswers(normalizeCourse(data.payload as Course));
+    if (data?.payload) return normalizeCourseRead(data.payload as Course);
     return undefined;
   }
 
@@ -202,7 +233,7 @@ export async function getServerCourse(id: string, request?: Request) {
   const hydratedCourse = localCourses.get(id);
   if (!hydratedCourse) return undefined;
   const visible = hydratedCourse.userId === userId || userId === "local-beta-user";
-  return visible ? dropStaleExerciseAnswers(normalizeCourse(hydratedCourse)) : undefined;
+  return visible ? normalizeCourseRead(hydratedCourse) : undefined;
 }
 
 /**
@@ -221,12 +252,12 @@ export async function getServerCourseForRender(id: string) {
       .maybeSingle();
 
     assertSupabaseNoError("Read course for render", error);
-    return data?.payload ? dropStaleExerciseAnswers(normalizeCourse(data.payload as Course)) : undefined;
+    return data?.payload ? normalizeCourseRead(data.payload as Course) : undefined;
   }
 
   await hydrateLocalStore();
   const local = localCourses.get(id);
-  return local ? dropStaleExerciseAnswers(normalizeCourse(local)) : undefined;
+  return local ? normalizeCourseRead(local) : undefined;
 }
 
 type CourseSummaryRow = {
@@ -315,7 +346,7 @@ export async function listServerCourses(request?: Request) {
   return [...localCourses.values()]
     .filter((course) => course.userId === userId || userId === "local-beta-user")
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-    .map(normalizeCourse);
+    .map(normalizeCourseRead);
 }
 
 export async function deleteServerCourse(id: string, request?: Request) {
@@ -384,7 +415,7 @@ export async function deleteServerCourseByAdmin(id: string) {
     .maybeSingle();
 
   if (readError) throw new Error(`读取课程失败：${readError.message}`);
-  const course = data?.payload ? normalizeCourse(data.payload as Course) : undefined;
+  const course = data?.payload ? normalizeCourseRead(data.payload as Course) : undefined;
 
   // Deleting the course row cascades to chapters, sections, annotations,
   // exports and generation_jobs. Quality reports are deleted explicitly.
@@ -478,6 +509,19 @@ export async function updateServerChapter(
     const chapters = latestCourse.chapters.map((chapter) => {
       if (chapter.id !== chapterId) return chapter;
       const next = { ...chapter, ...patch };
+      // Canonicalize the guide fields: patches may carry companionGuide
+      // (new canonical) or the deprecated lecture mirror; both land on
+      // companionGuide and keep the in-memory mirror in sync.
+      if ("companionGuide" in patch || "lecture" in patch) {
+        const guidePatch = patch.companionGuide ?? patch.lecture;
+        if (guidePatch === undefined) {
+          delete next.companionGuide;
+          delete next.lecture;
+        } else {
+          next.companionGuide = guidePatch;
+          next.lecture = guidePatch;
+        }
+      }
       // Reverse race guard: answers generated from the OLD body must not
       // survive a regeneration of the body. Only a patch that explicitly
       // carries exerciseAnswers may keep them.
@@ -489,6 +533,19 @@ export async function updateServerChapter(
       ) {
         delete next.exerciseAnswers;
         delete next.exerciseAnswersSourceContentHash;
+      }
+      // Same guard for the companion guide: a guide condensed from the OLD
+      // body must not survive a regeneration. Only a patch that explicitly
+      // carries the guide fields may keep it.
+      if (
+        bodyPatchTouchesBody &&
+        !("companionGuide" in patch) &&
+        !("lecture" in patch) &&
+        (next.companionGuide || next.lecture) &&
+        hashChapterContent(getChapterBody(next)) !== hashChapterContent(getChapterBody(chapter))
+      ) {
+        delete next.companionGuide;
+        delete next.lecture;
       }
       return next;
     });
@@ -536,6 +593,63 @@ export async function updateChapterAnswersIfContentHashMatches(
     return { applied: true, course: updated };
   });
 }
+
+/**
+ * Atomically write a chapter's companion guide ONLY if the chapter content
+ * still matches expectedContentHash — the companion-guide analogue of
+ * updateChapterAnswersIfContentHashMatches. Read + verify + write happen
+ * inside ONE course update lock: a regeneration either lands before this
+ * lock (hash mismatch → nothing is written and the caller marks the job
+ * superseded) or after it (its lock turn re-reads the course containing
+ * this guide).
+ */
+export async function updateChapterCompanionIfContentHashMatches(
+  courseId: string,
+  chapterId: string,
+  expectedContentHash: string,
+  companionGuide: CompanionGuide,
+  request?: Request,
+): Promise<{ applied: boolean; course?: Course }> {
+  return withCourseUpdateLock(courseId, async () => {
+    const latestCourse = await getServerCourse(courseId, request);
+    if (!latestCourse) return { applied: false };
+    const chapter = latestCourse.chapters.find((item) => item.id === chapterId);
+    if (!chapter) return { applied: false };
+    if (hashChapterContent(getChapterBody(chapter)) !== expectedContentHash) {
+      return { applied: false, course: latestCourse };
+    }
+    const updated = await saveServerChapterUpdate(
+      {
+        ...latestCourse,
+        chapters: latestCourse.chapters.map((item) =>
+          item.id === chapterId ? { ...item, companionGuide } : item,
+        ),
+      },
+      chapterId,
+      request,
+    );
+    return { applied: true, course: updated };
+  });
+}
+
+/**
+ * Storage canonicalization: rows only ever persist companionGuide — the
+ * deprecated `lecture` mirror is stripped before a payload reaches the
+ * database or the local store, so new writes never resurrect the old key.
+ */
+function canonicalizeChapterForStorage(chapter: Chapter): Chapter {
+  const next = { ...chapter };
+  if (next.companionGuide === undefined && next.lecture !== undefined) {
+    next.companionGuide = next.lecture;
+  }
+  delete next.lecture;
+  return next;
+}
+
+function canonicalizeCourseForStorage(course: Course): Course {
+  return { ...course, chapters: course.chapters.map(canonicalizeChapterForStorage) };
+}
+
 async function saveServerChapterUpdate(course: Course, chapterId: string, request?: Request) {
   const userId = await resolveUserId(request);
   const nextCourse = {
@@ -562,7 +676,7 @@ async function saveServerChapterUpdate(course: Course, chapterId: string, reques
       user_id: userId,
       topic: nextCourse.topic,
       goal: nextCourse.goal,
-      payload: nextCourse,
+      payload: canonicalizeCourseForStorage(nextCourse),
       created_at: nextCourse.createdAt,
       updated_at: nextCourse.updatedAt,
     }),
@@ -576,7 +690,7 @@ async function saveServerChapterUpdate(course: Course, chapterId: string, reques
       title: chapter.title,
       status: chapter.status ?? "pending",
       order_index: chapterIndex,
-      payload: chapter,
+      payload: canonicalizeChapterForStorage(chapter),
       updated_at: nextCourse.updatedAt,
     }),
   );
@@ -1614,7 +1728,7 @@ async function persistLocalStore(options: { mergeDisk?: boolean } = {}) {
 
 function snapshotLocalStore(): LocalStore {
   return {
-    courses: [...localCourses.values()],
+    courses: [...localCourses.values()].map(canonicalizeCourseForStorage),
     annotations: [...localAnnotations.values()],
     revisions: [...localRevisions.values()],
     exports: [...localExports.values()],

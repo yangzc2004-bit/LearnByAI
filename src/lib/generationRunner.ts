@@ -918,7 +918,18 @@ async function failLectureGenerationJob(input: {
   request?: Request;
 }): Promise<ChapterGenerationJobResult> {
   const { job, course, chapterId, message, superseded, status, request } = input;
-  const jobStatus = superseded ? "superseded" : "failed";
+  // Failure write guard (companion-guide plan P0 #7): verify the body
+  // fingerprint once more before writing the failure marker, so a stale job
+  // that failed after a regeneration supersedes itself instead of overwriting
+  // the newer chapter state with an old failure.
+  const latestCourse = await getServerCourse(course.id, request);
+  const latestChapter = latestCourse?.chapters.find((item) => item.id === chapterId);
+  const latestContent = latestChapter ? getChapterBody(latestChapter) : "";
+  const bodyChanged = Boolean(job.sourceContentHash) &&
+    Boolean(latestContent) &&
+    hashChapterContent(latestContent) !== job.sourceContentHash;
+  const effectiveSuperseded = Boolean(superseded) || bodyChanged;
+  const jobStatus = effectiveSuperseded ? "superseded" : "failed";
   const patched = patchGenerationJob(job.id, { status: jobStatus, error: message });
   const eventJob = appendJobEvent(job.id, {
     agent: "AUTHOR",
@@ -927,14 +938,14 @@ async function failLectureGenerationJob(input: {
   }, { preserveJobStatus: true });
   const persisted = eventJob ?? patched ?? job;
   await saveServerGenerationJob(persisted, request);
-  if (!superseded) {
+  if (!effectiveSuperseded) {
     await updateServerChapter(course, chapterId, {
       lecture: { status: "failed", error: message },
     }, request);
   }
   return {
     error: message,
-    status: status ?? (superseded ? 409 : 502),
+    status: status ?? (effectiveSuperseded ? 409 : 502),
     job: getGenerationJob(job.id) ?? persisted,
     course,
     chapter: course.chapters.find((item) => item.id === chapterId),
