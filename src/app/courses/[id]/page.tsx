@@ -112,6 +112,7 @@ export default function CourseOverviewPage() {
   const [auditing, setAuditing] = useState(false);
   const [auditError, setAuditError] = useState("");
   const [auditResult, setAuditResult] = useState<TerminologyAuditReport | null>(null);
+  const [savingFigureMode, setSavingFigureMode] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -291,6 +292,24 @@ export default function CourseOverviewPage() {
     }
   }
 
+  async function updateFigureMode(mode: string) {
+    if (!course || savingFigureMode) return;
+    setSavingFigureMode(true);
+    try {
+      const response = await apiFetch(`/api/courses/${course.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ figureMode: mode }),
+      });
+      const data = (await response.json().catch(() => ({}))) as { course?: Course; error?: string };
+      if (!response.ok || !data.course) throw new Error(data.error ?? "插图模式更新失败。");
+      setCourse(data.course);
+    } catch (error) {
+      setAuditError(publicSafeErrorMessage(error, "插图模式更新失败。"));
+    } finally {
+      setSavingFigureMode(false);
+    }
+  }
+
   async function runTerminologyAudit() {
     if (!course) return;
     setAuditing(true);
@@ -411,6 +430,19 @@ export default function CourseOverviewPage() {
             >
               <ScanSearch size={14} /> {auditing ? "审计中（需数分钟）" : "术语一致性审计"}
             </button>
+            <label className="inline-flex items-center gap-1 text-xs text-muted-foreground" title="对之后生成的章节生效：AI 生图统一画风；代码渲染保证结构图文字清晰；关闭则不生成插图">
+              插图
+              <select
+                value={course.figureMode ?? "model"}
+                onChange={(event) => void updateFigureMode(event.target.value)}
+                disabled={savingFigureMode}
+                className="rounded-md border border-border bg-background px-1.5 py-1 text-xs text-foreground disabled:opacity-50"
+              >
+                <option value="model">AI 生图</option>
+                <option value="code">代码渲染</option>
+                <option value="off">不生成插图</option>
+              </select>
+            </label>
           </div>
           {exportError && <p className="mt-4 text-sm text-destructive">{exportError}</p>}
           {exportWarnings.length > 0 && (

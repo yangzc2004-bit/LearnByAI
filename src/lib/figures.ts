@@ -3,21 +3,39 @@ import "server-only";
 import { generateIllustrationImage, getUserImageModelConfig, saveIllustrationImage } from "./illustration";
 import { safeErrorMessage } from "./safeError";
 import type { ModelOverrides } from "./modelOverrides";
-import type { Chapter, Course, FigureAsset, FigurePlaceholder, ImageGenerationMode } from "./types";
+import type { Chapter, Course, FigureAsset, FigureMode, FigurePlaceholder, ImageGenerationMode } from "./types";
 
 const FIGURE_BLOCK_RE = /:::learnbyai-figure[^\n]*\n([\s\S]*?)\n:::/gu;
 const MAX_FIGURE_CAPTION = 80;
 
 /**
- * Route a figure placeholder to its renderer. Structured diagrams (a
- * diagramSpec exists and text labels are allowed) must be programmatic —
- * AI bitmaps blur and mangle labeled structure. Intent-only illustrations
- * (no diagramSpec, or labels explicitly disallowed) go to the image model
- * when one is configured.
+ * Figure policy routing. The user's chosen course figureMode wins:
+ * - "model": AI image for every figure (unified style).
+ * - "code": programmatic SVG for every figure.
+ * - "off": figures are stripped entirely (handled by the caller).
+ * Default (undefined): AI image when an image model is configured, otherwise
+ * programmatic SVG. The code renderer still draws structured specs (diagramSpec
+ * chains) as proper flowcharts, so the fallback stays correct and readable.
  */
-export function figureModeFor(placeholder: FigurePlaceholder, modelAvailable: boolean): ImageGenerationMode {
-  if (placeholder.diagramSpec && placeholder.textLabelsAllowed !== false) return "code";
+export function figureModeFor(
+  _placeholder: FigurePlaceholder,
+  modelAvailable: boolean,
+  courseMode?: FigureMode,
+): ImageGenerationMode | "off" {
+  if (courseMode === "off") return "off";
+  if (courseMode === "code") return "code";
+  if (courseMode === "model") return modelAvailable ? "model" : "code";
   return modelAvailable ? "model" : "code";
+}
+
+/**
+ * Strip figure placeholders from a chapter body — used when the user disables
+ * figures ("off"): no placeholder traces, no failure notes, no figures.
+ */
+export function stripFigurePlaceholders(content: string) {
+  const normalized = normalizeFigurePlaceholderSyntax(content);
+  FIGURE_BLOCK_RE.lastIndex = 0;
+  return normalized.replace(FIGURE_BLOCK_RE, "").replace(/\n{3,}/gu, "\n\n").trim();
 }
 
 /**
@@ -83,6 +101,11 @@ export async function processChapterFigures(input: {
   const blocks = parseFigurePlaceholders(content);
   if (blocks.length === 0) return { content, assets: [], skipped: [] };
 
+  // User disabled figures for this course: strip the placeholders entirely.
+  if (input.course.figureMode === "off") {
+    return { content: stripFigurePlaceholders(content), assets: [], skipped: [] };
+  }
+
   const modelAvailable = Boolean(getUserImageModelConfig(input.overrides));
   const chapterIndex = Math.max(0, input.course.chapters.findIndex((item) => item.id === input.chapter.id));
   const chapterNumber = chapterIndex + 1;
@@ -95,10 +118,13 @@ export async function processChapterFigures(input: {
   for (const block of blocks) {
     next += content.slice(last, block.start);
     const placeholder = block.placeholder;
-    // Per-figure routing: structured diagrams carrying text labels (diagramSpec
-    // present, labels allowed) are drawn programmatically — vector-crisp with
-    // correct text. AI bitmaps are reserved for intent-only illustrations.
-    const mode = figureModeFor(placeholder, modelAvailable);
+    // Per the user's figure policy: AI image everywhere when configured,
+    // programmatic SVG otherwise (or when the user picks 代码渲染).
+    const mode = figureModeFor(placeholder, modelAvailable, input.course.figureMode);
+    if (mode === "off") {
+      last = block.end;
+      continue;
+    }
     const figureNumber = countRenderedFigures(content.slice(0, block.start)) + successfulInsertedBefore + 1;
     const label = `图 ${chapterNumber}.${figureNumber}`;
     const now = new Date().toISOString();
@@ -198,7 +224,11 @@ function unwrapFencedFigurePayloads(content: string) {
 }
 
 export async function createTextbookMapFigure(course: Course, overrides?: ModelOverrides): Promise<FigureAsset> {
-  const mode: ImageGenerationMode = getUserImageModelConfig(overrides) ? "model" : "code";
+  if (course.figureMode === "off") throw new Error("该课程已关闭插图生成。");
+  const mode: ImageGenerationMode =
+    course.figureMode === "code"
+      ? "code"
+      : getUserImageModelConfig(overrides) ? "model" : "code";
   const caption = "全书结构地图";
   const chapterNames = course.chapters.map((chapter, index) => `${index + 1}. ${chapter.title}`).join("；");
   const placeholder: FigurePlaceholder = {
@@ -243,7 +273,12 @@ export async function regenerateChapterFigure(input: {
   placeholder: FigurePlaceholder;
   overrides?: ModelOverrides;
 }): Promise<FigureAsset> {
-  const mode = figureModeFor(input.placeholder, Boolean(getUserImageModelConfig(input.overrides)));
+  const mode = figureModeFor(
+    input.placeholder,
+    Boolean(getUserImageModelConfig(input.overrides)),
+    input.course.figureMode,
+  );
+  if (mode === "off") throw new Error("该课程已关闭插图生成。");
   const generated = mode === "model"
     ? await generateModelFigure(input.placeholder, input.overrides)
     : generateCodeFigure(input.placeholder, input.label);

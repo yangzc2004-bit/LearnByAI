@@ -5,9 +5,9 @@ import { runChapterGenerationJob } from "@/lib/generationRunner";
 import { createGenerationJob } from "@/lib/jobs";
 import { parseModelOverridesFromHeaders } from "@/lib/modelOverrides";
 import { publicGenerationJob } from "@/lib/publicGenerationJob";
-import { deleteServerCourse, getActiveServerGenerationJobForChapter, getServerCourse, saveServerGenerationJob, updateServerChapter } from "@/lib/serverStore";
+import { deleteServerCourse, getActiveServerGenerationJobForChapter, getServerCourse, saveServerCourse, saveServerGenerationJob, updateServerChapter } from "@/lib/serverStore";
 import { resolveModelOverrides } from "@/lib/userModelConfig";
-import { Chapter, Course, GenerationJob } from "@/lib/types";
+import { Chapter, Course, FigureMode, GenerationJob } from "@/lib/types";
 
 export async function GET(
   request: Request,
@@ -26,6 +26,34 @@ export async function GET(
   const { course: hydratedCourse, jobs } = await enqueueDraftReviewJobs(course, request, auth.userId);
 
   return NextResponse.json({ course: hydratedCourse, jobs: jobs.map(publicGenerationJob) });
+}
+
+/** Course-level settings (currently the figure policy). */
+export async function PATCH(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const { id } = await params;
+  const auth = await requireApiUser(request);
+  if ("response" in auth) return auth.response;
+
+  const course = await getServerCourse(id, request);
+  if (!course) return NextResponse.json({ error: "Course not found" }, { status: 404 });
+
+  const body = (await request.json().catch(() => ({}))) as { figureMode?: unknown };
+  if (body.figureMode !== undefined) {
+    if (!["model", "code", "off"].includes(String(body.figureMode))) {
+      return NextResponse.json({ error: "figureMode must be model | code | off" }, { status: 400 });
+    }
+    const updated = await saveServerCourse({
+      ...course,
+      figureMode: body.figureMode as FigureMode,
+      updatedAt: new Date().toISOString(),
+    }, request);
+    return NextResponse.json({ course: updated });
+  }
+
+  return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
 }
 
 export async function DELETE(

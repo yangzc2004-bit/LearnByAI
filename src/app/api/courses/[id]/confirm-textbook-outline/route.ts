@@ -74,11 +74,13 @@ export async function POST(
     chapter.generationJobId = job.id;
   }
 
-  const textbookMap = await createTextbookMapSafely({
-    ...course,
-    chapters: preparedChapters,
-    textbookMeta,
-  }, modelOverrides);
+  const textbookMap = course.figureMode === "off"
+    ? undefined
+    : await createTextbookMapSafely({
+      ...course,
+      chapters: preparedChapters,
+      textbookMeta,
+    }, modelOverrides);
 
   const courseToSave: Course = {
     ...course,

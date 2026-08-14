@@ -197,6 +197,8 @@ export type ChapterContract = {
   summaryForNext?: string;
 };
 
+export type FigureMode = "model" | "code" | "off";
+
 export type DisciplineKind =
   | "algorithm-engineering"
   | "theory-math"
@@ -212,6 +214,11 @@ export type Course = {
    *  content-mix rules (runnable code for algorithm courses, full derivation
    *  chains for theory courses) and their deterministic TQH checks. */
   discipline?: DisciplineKind;
+  /** Figure policy chosen by the user: "model" = AI image for every figure
+   *  (unified style), "code" = programmatic SVG, "off" = no figures at all.
+   *  Default (undefined) = AI image when an image model is configured,
+   *  programmatic SVG otherwise. Applies to chapters generated afterwards. */
+  figureMode?: FigureMode;
   topic: string;
   goal: string;
   background: string;
