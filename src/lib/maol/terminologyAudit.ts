@@ -156,7 +156,6 @@ export function generateChapterCandidatePairs(
 export function rankBookCandidates(
   chapterPairs: { variants: string[]; rare: number; imbalance: number; total: number; title: boolean }[][],
   chapterContents: string[],
-  titleContents: string[] = [],
   maxPairs = 60,
 ) {
   const merged = new Map<string, { variants: string[]; rare: number; imbalance: number; total: number; title: boolean }>();
@@ -171,14 +170,12 @@ export function rankBookCandidates(
   }
   return [...merged.values()]
     .map((pair) => {
+      // Ranking counts use the BODY only: title occurrences would inflate the
+      // rare side (title 马尔科夫 + body 马尔科夫 = rare 2) and push the pair
+      // below rare-1 shard pairs in the judge's limited slots. Titles still
+      // count for conflict detection, occurrence totals and canonical choice.
       const counts = pair.variants.map((variant) =>
-        chapterContents.reduce(
-          (sum, content, index) =>
-            sum +
-            occurrencesOutsideFences(content, variant) +
-            occurrencesInTitle(titleContents[index] ?? "", variant),
-          0,
-        ),
+        chapterContents.reduce((sum, content) => sum + occurrencesOutsideFences(content, variant), 0),
       );
       return {
         variants: pair.variants,
@@ -541,7 +538,7 @@ export async function runTerminologyAudit(
     const chapterPairs = fullContents.map((content, index) =>
       generateChapterCandidatePairs(content, fullTitles[index]),
     );
-    const candidates = rankBookCandidates(chapterPairs, fullContents, fullTitles);
+    const candidates = rankBookCandidates(chapterPairs, fullContents);
 
     // Stage 2 (one LLM call): evidence-backed judge over the ranked pairs.
     const judgeRaw = await dispatchAgentText({
