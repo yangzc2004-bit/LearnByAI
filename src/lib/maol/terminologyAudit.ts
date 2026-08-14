@@ -55,19 +55,20 @@ const MAX_NGRAMS_PER_BOOK = 3000;
 const MAX_JUDGE_PAIRS = 60;
 
 /**
- * Deterministic term candidate extraction: CJK runs of length 3-8 broken into
- * sliding n-grams, keeping only grams that appear at least twice in the
- * chapter. A shorter gram is suppressed when ≥90% of its occurrences are
- * covered by longer grams (价值函 ⊂ 价值函数), so the candidate list carries
- * real words instead of grammatical shards. Complete recall, zero LLM cost.
+ * Deterministic term candidate extraction: CJK runs of length 4-16 broken
+ * into sliding 4-8 char windows, keeping only grams that appear at least
+ * twice in the chapter. Three-character windows are skipped entirely — they
+ * are dominated by cross-word shards (的动作, 为策略) that flood the judge's
+ * slots. A shorter gram is suppressed when ≥90% of its occurrences are
+ * covered by longer grams (价值函 ⊂ 价值函数). Complete recall, zero LLM cost.
  */
 export function extractCjkNgrams(content: string, maxTerms = MAX_NGRAMS_PER_CHAPTER): string[] {
   const counts = new Map<string, number>();
   // Match whole CJK runs (up to 16 chars) so term counts don't get broken by
-  // run truncation, then slide 3-8 char windows inside each run.
-  for (const match of content.matchAll(/[\u4e00-\u9fff]{3,16}/gu)) {
+  // run truncation, then slide 4-8 char windows inside each run.
+  for (const match of content.matchAll(/[\u4e00-\u9fff]{4,16}/gu)) {
     const run = match[0];
-    for (let size = 3; size <= Math.min(8, run.length); size += 1) {
+    for (let size = 4; size <= Math.min(8, run.length); size += 1) {
       for (let start = 0; start + size <= run.length; start += 1) {
         const gram = run.slice(start, start + size);
         counts.set(gram, (counts.get(gram) ?? 0) + 1);
@@ -83,7 +84,7 @@ export function extractCjkNgrams(content: string, maxTerms = MAX_NGRAMS_PER_CHAP
   for (const [gram, count] of entries) {
     if ((covered.get(gram) ?? 0) >= count * 0.9) continue;
     kept.push([gram, count]);
-    for (let size = 3; size < gram.length; size += 1) {
+    for (let size = 4; size < gram.length; size += 1) {
       for (let start = 0; start + size <= gram.length; start += 1) {
         const sub = gram.slice(start, start + size);
         covered.set(sub, (covered.get(sub) ?? 0) + count);
@@ -103,7 +104,7 @@ export function extractCjkNgrams(content: string, maxTerms = MAX_NGRAMS_PER_CHAP
  */
 export function findNearDuplicatePairs(terms: string[]): { english?: string; variants: string[] }[] {
   const normalized = [...new Set(terms.map((term) => term.trim()))].filter(
-    (term) => term.length >= 3 && term.length <= 8,
+    (term) => term.length >= 4 && term.length <= 8,
   );
   const pairs: { english?: string; variants: string[] }[] = [];
   const seen = new Set<string>();

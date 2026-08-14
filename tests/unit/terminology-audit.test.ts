@@ -31,23 +31,23 @@ test("extractCjkNgrams suppresses sub-word fragments of longer grams", () => {
 });
 
 test("findNearDuplicatePairs seeds same-length one-character-difference pairs", () => {
-  const pairs = findNearDuplicatePairs(["马尔可夫", "马尔科夫", "同策略", "在策略", "价值迭代", "策略迭代", "蒙特卡洛"]);
+  const pairs = findNearDuplicatePairs(["马尔可夫", "马尔科夫", "回放缓冲区", "重放缓冲区", "价值迭代", "策略迭代", "蒙特卡洛"]);
   const flat = pairs.map((pair) => pair.variants.sort().join("/")).sort();
   assert.ok(flat.includes("马尔可夫/马尔科夫"), JSON.stringify(flat));
-  assert.ok(flat.includes("同策略/在策略"), JSON.stringify(flat));
+  assert.ok(flat.includes("回放缓冲区/重放缓冲区"), JSON.stringify(flat));
   assert.ok(!flat.some((pair) => pair.includes("价值迭代") && pair.includes("策略迭代")), JSON.stringify(flat));
 });
 
 test("filterCoOccurringPairs keeps only pairs whose variants share a chapter", () => {
   const contents = [
     "本章讨论马尔可夫决策过程，其中马尔科夫链被反复使用。",
-    "本章只有在策略方法，另一章才有同策略。",
-    "同策略与在策略同时出现在这一章。",
+    "本章只有重放缓冲区方法，另一章才有回放缓冲区。",
+    "回放缓冲区与重放缓冲区同时出现在这一章。",
   ];
   const pairs = filterCoOccurringPairs(
     [
       { variants: ["马尔可夫", "马尔科夫"] },
-      { variants: ["同策略", "在策略"] },
+      { variants: ["回放缓冲区", "重放缓冲区"] },
     ],
     contents,
   );
@@ -57,12 +57,12 @@ test("filterCoOccurringPairs keeps only pairs whose variants share a chapter", (
 test("rankCandidatePairs puts frequency-imbalanced pairs first", () => {
   const contents = [
     "马尔可夫 ".repeat(30) + "马尔科夫",
-    "同策略 ".repeat(10) + "在策略 ".repeat(9),
+    "回放缓冲区 ".repeat(10) + "重放缓冲区 ".repeat(9),
     "状态价值 ".repeat(20) + "动作价值 ".repeat(20),
   ];
   const ranked = rankCandidatePairs(
     [
-      { variants: ["同策略", "在策略"] },
+      { variants: ["回放缓冲区", "重放缓冲区"] },
       { variants: ["状态价值", "动作价值"] },
       { variants: ["马尔可夫", "马尔科夫"] },
     ],
