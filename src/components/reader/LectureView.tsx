@@ -1,8 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { MarkdownContent } from "@/components/MarkdownContent";
 import { ChapterLecture, LectureProgress, Section } from "@/lib/types";
-import { BookOpen, CheckCircle2, ChevronDown, Lightbulb, ListChecks, RotateCcw, Sparkles, Target } from "lucide-react";
+import { BookOpen, CheckCircle2, ChevronRight, Lightbulb, RotateCcw, Target } from "lucide-react";
 
 type LectureViewProps = {
   lecture: ChapterLecture;
@@ -14,10 +15,12 @@ type LectureViewProps = {
 };
 
 /**
- * The interactive lecture (讲义) reader: objectives → progressive blocks
- * (review → teach → recap → preview) → inline self-checks → final quiz with
- * scoring and completion checkmark. Each teach block anchors back to its
- * textbook section.
+ * The lecture (讲义) reader: a continuous, document-style lecture-note view —
+ * learning objectives, a flowing sequence of teach sections (intuition →
+ * definition/concept box → worked example box, each anchored back to its
+ * textbook section), a recap, a next-lecture preview, then inline self-checks
+ * and a final quiz with scoring + check-in. Every text field renders through
+ * the KaTeX pipeline so $...$ math is typeset, never shown as raw source.
  */
 export function LectureView({
   lecture,
@@ -28,7 +31,6 @@ export function LectureView({
   onJumpToSection,
 }: LectureViewProps) {
   const blocks = lecture.blocks ?? [];
-  const [revealedCount, setRevealedCount] = useState(() => (progress?.completed ? blocks.length : 1));
   const [quizAnswers, setQuizAnswers] = useState<Record<number, number>>({});
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -39,7 +41,6 @@ export function LectureView({
       : undefined,
   );
 
-  const allRevealed = revealedCount >= blocks.length;
   const quiz = lecture.finalQuiz ?? [];
   const score = quiz.reduce((sum, question, index) => (
     sum + (quizAnswers[index] === question.correctIndex ? 1 : 0)
@@ -55,6 +56,8 @@ export function LectureView({
     }
     return map;
   }, [sections]);
+
+  const teachBlocks = blocks.filter((block): block is Extract<(typeof blocks)[number], { kind: "teach" }> => block.kind === "teach");
 
   function jumpToAnchor(anchorSection: string) {
     const sectionId = anchorMap.get(anchorSection);
@@ -93,154 +96,131 @@ export function LectureView({
   }
 
   return (
-    <div className="space-y-8">
-      {/* Completion badge */}
+    <div className="space-y-2">
+      {/* Completion line — small, so the document stays a document. */}
       {localProgress?.completed && (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm">
-          <CheckCircle2 size={16} className="text-emerald-500" />
-          <span className="text-emerald-700 dark:text-emerald-300">本讲已完成打卡</span>
-          {latestScore && (
-            <span className="font-mono text-xs text-muted-foreground">
-              最近小测 {latestScore.score}/{latestScore.total}
-            </span>
-          )}
+        <p className="flex flex-wrap items-center gap-2 text-xs text-emerald-600 dark:text-emerald-400">
+          <CheckCircle2 size={13} />
+          本讲已完成打卡
+          {latestScore && <span className="font-mono">最近小测 {latestScore.score}/{latestScore.total}</span>}
           {localProgress.bestScore !== undefined && localProgress.bestScore > 0 && (
-            <span className="font-mono text-xs text-muted-foreground">
-              历史最佳 {localProgress.bestScore}
-            </span>
+            <span className="font-mono">历史最佳 {localProgress.bestScore}</span>
           )}
-        </div>
+        </p>
       )}
 
       {/* Learning objectives */}
       {(lecture.learningObjectives?.length ?? 0) > 0 && (
-        <section className="rounded-lg border border-border bg-card p-5">
-          <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground">
-            <Target size={16} className="text-primary" />
+        <section className="my-6 rounded-lg border border-border bg-muted/20 px-5 py-4">
+          <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
+            <Target size={15} className="text-primary" />
             本讲目标
           </h2>
-          <ul className="space-y-2">
+          <ul className="space-y-1.5">
             {lecture.learningObjectives!.map((objective, index) => (
-              <li key={index} className="flex items-start gap-2 text-sm leading-relaxed text-muted-foreground">
+              <li key={index} className="flex items-start gap-2 text-sm leading-relaxed">
                 <span className="mt-0.5 font-mono text-xs text-primary">{index + 1}.</span>
-                <span>{objective}</span>
+                <MarkdownContent content={objective} variant="chat" />
               </li>
             ))}
           </ul>
         </section>
       )}
 
-      {/* Progressive blocks */}
-      {blocks.slice(0, Math.min(revealedCount, blocks.length)).map((block, index) => {
-        if (block.kind === "review") {
-          return (
-            <section key={index} className="rounded-lg border border-border bg-muted/20 p-5">
-              <h2 className="mb-2 text-sm font-semibold text-foreground">上节回顾</h2>
-              <p className="text-sm leading-relaxed text-muted-foreground">{block.text}</p>
-            </section>
-          );
-        }
-        if (block.kind === "teach") {
-          const sectionId = block.anchorSection ? anchorMap.get(block.anchorSection) : undefined;
-          return (
-            <section key={index} className="rounded-lg border border-border bg-card p-5">
-              <h2 className="mb-4 text-lg font-semibold tracking-tight text-foreground">{block.title}</h2>
-              <div className="space-y-4 text-sm leading-relaxed">
-                <div>
-                  <h3 className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-primary">
-                    <Lightbulb size={13} /> 直觉切入
-                  </h3>
-                  <p className="text-muted-foreground">{block.intuition}</p>
+      {/* Continuous document flow */}
+      <article className="space-y-6">
+        {blocks.map((block, index) => {
+          if (block.kind === "review") {
+            return (
+              <section key={index}>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">回顾</p>
+                <MarkdownContent content={block.text} variant="chat" />
+              </section>
+            );
+          }
+          if (block.kind === "teach") {
+            const sectionId = block.anchorSection ? anchorMap.get(block.anchorSection) : undefined;
+            const teachIndex = teachBlocks.findIndex((item) => item === block) + 1;
+            const heading = block.anchorSection
+              ? `${block.anchorSection} ${block.title}`
+              : `${teachIndex} ${block.title}`;
+            return (
+              <section key={index} className="border-t border-border/60 pt-5">
+                <h2 className="mb-4 text-lg font-semibold tracking-tight text-foreground">
+                  {heading}
+                </h2>
+                <div className="mb-3 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-primary">
+                  <Lightbulb size={13} /> 直觉
                 </div>
-                <div>
-                  <h3 className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-primary">
-                    <BookOpen size={13} /> 核心概念
-                  </h3>
-                  <p className="text-foreground">{block.concept}</p>
-                </div>
-                <div>
-                  <h3 className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-primary">
-                    <Sparkles size={13} /> 最小例子
-                  </h3>
-                  <p className="text-muted-foreground">{block.example}</p>
-                </div>
-              </div>
-              {block.anchorSection && sectionId && (
-                <button
-                  type="button"
-                  onClick={() => jumpToAnchor(block.anchorSection!)}
-                  className="mt-4 inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                >
-                  回教材 {chapterNumber}.{block.anchorSection} 节看原文 →
-                </button>
-              )}
-            </section>
-          );
-        }
-        if (block.kind === "recap") {
-          return (
-            <section key={index} className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-5">
-              <h2 className="mb-3 text-sm font-semibold text-amber-700 dark:text-amber-300">30 秒复盘：记住这 3 件事</h2>
-              <ul className="space-y-2">
-                {block.points.map((point, pointIndex) => (
-                  <li key={pointIndex} className="flex items-start gap-2 text-sm leading-relaxed text-muted-foreground">
-                    <span className="mt-0.5 font-mono text-xs text-amber-600 dark:text-amber-400">{pointIndex + 1}.</span>
-                    <span>{point}</span>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          );
-        }
-        return (
-          <section key={index} className="rounded-lg border border-border bg-muted/20 p-5">
-            <h2 className="mb-2 text-sm font-semibold text-foreground">下讲预告</h2>
-            <p className="text-sm leading-relaxed text-muted-foreground">{block.text}</p>
-          </section>
-        );
-      })}
+                <MarkdownContent content={block.intuition} variant="chat" />
 
-      {/* Continue button */}
-      {!allRevealed && (
-        <button
-          type="button"
-          onClick={() => setRevealedCount((count) => Math.min(blocks.length, count + 1))}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-border py-3 text-sm text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
-        >
-          <ChevronDown size={16} />
-          继续下一块（{revealedCount}/{blocks.length}）
-        </button>
-      )}
+                <div className="mb-3 mt-5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-primary">
+                  <BookOpen size={13} /> 核心概念
+                </div>
+                <div className="mb-5 rounded-r-lg border-l-2 border-primary bg-muted/30 py-1 pl-4">
+                  <MarkdownContent content={block.concept} variant="chat" />
+                </div>
 
-      {/* Self-check */}
-      {allRevealed && (lecture.selfCheck?.length ?? 0) > 0 && (
-        <section className="rounded-lg border border-border bg-card p-5">
-          <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground">
-            <ListChecks size={16} className="text-primary" />
-            随堂自测（先自己想，再点开答案）
-          </h2>
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400">例题</div>
+                <div className="rounded-r-lg border-l-2 border-amber-500/60 bg-amber-500/5 py-1 pl-4">
+                  <MarkdownContent content={block.example} variant="chat" />
+                </div>
+
+                {block.anchorSection && sectionId && (
+                  <button
+                    type="button"
+                    onClick={() => jumpToAnchor(block.anchorSection!)}
+                    className="mt-4 inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                  >
+                    回教材第 {block.anchorSection} 节看原文 <ChevronRight size={13} />
+                  </button>
+                )}
+              </section>
+            );
+          }
+          if (block.kind === "recap") {
+            return (
+              <section key={index} className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-5 py-4">
+                <h2 className="mb-2 text-sm font-semibold text-amber-700 dark:text-amber-300">小结：记住这 3 件事</h2>
+                <ul className="space-y-1.5">
+                  {block.points.map((point, pointIndex) => (
+                    <li key={pointIndex} className="flex items-start gap-2 text-sm leading-relaxed">
+                      <span className="mt-0.5 font-mono text-xs text-amber-600 dark:text-amber-400">{pointIndex + 1}.</span>
+                      <MarkdownContent content={point} variant="chat" />
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            );
+          }
+          return (
+            <section key={index} className="border-t border-border/60 pt-5">
+              <h2 className="mb-2 text-sm font-semibold text-muted-foreground">下讲预告</h2>
+              <MarkdownContent content={block.text} variant="chat" />
+            </section>
+          );
+        })}
+      </article>
+
+      {/* Self-check — inline questions with foldable answers */}
+      {(lecture.selfCheck?.length ?? 0) > 0 && (
+        <section className="mt-8 border-t border-border pt-6">
+          <h2 className="mb-3 text-base font-semibold text-foreground">随堂自测</h2>
+          <p className="mb-3 text-xs text-muted-foreground">先自己想，再点开答案。</p>
           <div className="space-y-3">
             {lecture.selfCheck!.map((item, index) => (
-              <details key={index} className="group rounded-md border border-border bg-background px-4 py-3">
-                <summary className="cursor-pointer list-none text-sm text-foreground marker:hidden">
-                  <span className="mr-2 font-mono text-xs text-primary">{index + 1}.</span>
-                  {item.question}
-                </summary>
-                <p className="mt-2 border-t border-border/60 pt-2 text-sm leading-relaxed text-muted-foreground">
-                  {item.answer}
-                </p>
-              </details>
+              <SelfCheckItem key={index} index={index} question={item.question} answer={item.answer} />
             ))}
           </div>
         </section>
       )}
 
       {/* Final quiz */}
-      {allRevealed && quiz.length > 0 && (
-        <section className="rounded-lg border border-border bg-card p-5">
-          <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-foreground">
-            <Target size={16} className="text-primary" />
-            章末小测
+      {quiz.length > 0 && (
+        <section className="mt-8 border-t border-border pt-6">
+          <h2 className="mb-1 flex items-center gap-2 text-base font-semibold text-foreground">
+            <Target size={15} className="text-primary" />
+            本讲小测
           </h2>
           <p className="mb-4 text-xs text-muted-foreground">共 {quiz.length} 题 · 提交后显示得分并自动打卡。</p>
           <div className="space-y-6">
@@ -250,10 +230,10 @@ export function LectureView({
               const isWrong = submitted && answered !== undefined && answered !== question.correctIndex;
               return (
                 <div key={questionIndex} className="space-y-2">
-                  <p className="text-sm font-medium text-foreground">
-                    <span className="mr-2 font-mono text-xs text-muted-foreground">{questionIndex + 1}.</span>
-                    {question.question}
-                  </p>
+                  <div className="flex items-start gap-2 text-sm font-medium text-foreground">
+                    <span className="mt-0.5 font-mono text-xs text-muted-foreground">{questionIndex + 1}.</span>
+                    <MarkdownContent content={question.question} variant="chat" />
+                  </div>
                   <div className="space-y-1.5 pl-5">
                     {question.options.map((option, optionIndex) => {
                       const selected = answered === optionIndex;
@@ -277,15 +257,15 @@ export function LectureView({
                           } disabled:cursor-default`}
                         >
                           <span className="mt-px font-mono text-xs">{String.fromCharCode(65 + optionIndex)}.</span>
-                          <span>{option}</span>
+                          <MarkdownContent content={option} variant="chat" />
                         </button>
                       );
                     })}
                   </div>
                   {submitted && (
                     <div className={`pl-5 text-xs leading-relaxed ${isCorrect ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}>
-                      {isCorrect ? "回答正确。" : isWrong ? "回答错误。" : "未作答。"}{" "}
-                      {question.explanation}
+                      {isCorrect ? "回答正确。" : isWrong ? "回答错误。" : "未作答。"}
+                      <MarkdownContent content={question.explanation} variant="chat" />
                     </div>
                   )}
                 </div>
@@ -323,6 +303,30 @@ export function LectureView({
             </button>
           )}
         </section>
+      )}
+    </div>
+  );
+}
+
+function SelfCheckItem({ index, question, answer }: { index: number; question: string; answer: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-md border border-border bg-card px-4 py-3">
+      <div className="flex items-start gap-2 text-sm text-foreground">
+        <span className="mt-0.5 font-mono text-xs text-primary">{index + 1}.</span>
+        <MarkdownContent content={question} variant="chat" />
+      </div>
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="mt-2 text-xs text-primary hover:underline"
+      >
+        {open ? "收起答案" : "显示答案"}
+      </button>
+      {open && (
+        <div className="mt-2 border-t border-border/60 pt-2">
+          <MarkdownContent content={answer} variant="chat" />
+        </div>
       )}
     </div>
   );
