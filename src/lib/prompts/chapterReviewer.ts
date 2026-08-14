@@ -22,6 +22,7 @@ JSON 语法要求：
 - 独立公式没有使用 $$...$$。
 - 本章提前展开后续章节概念，导致课程连续性失控。
 - 内容明显浅、散、像博客，而不是教材。
+- 本章引入的命名概念疑似在文献中查无出处（造词/幻觉概念）。
 
 JSON 结构：
 {
@@ -29,13 +30,20 @@ JSON 结构：
   "issues": [
     {
       "severity": "low|medium|high",
-      "category": "structure|continuity|math|style|depth",
+      "category": "structure|continuity|math|style|depth|grounding",
       "message": "具体问题，说明位置或现象",
       "suggestion": "可执行的修复建议"
     }
   ],
+  "namedConcepts": ["本章引入的命名概念"],
+  "suspectConcepts": [{"term": "疑似查无出处的概念", "note": "为何可疑"}],
   "summary": "总体评价"
 }
+
+namedConcepts / suspectConcepts 规则：
+- namedConcepts 列出本章真正引入（而非仅仅使用）的命名概念，最多 12 个；没有就输出 []。
+- suspectConcepts 只列你判断「在权威文献中查无出处、可能是生造」的概念；判断标准是：该术语是否是你认识的领域标准术语？不认识且正文未给出文献出处的，列出来。没有就输出 []。
+- suspectConcepts 不影响 passed 判定，但会作为 grounding 警告进入质检报告。
 
 判定标准：
 - 只有影响阅读、导出或课程连续性的严重问题才标 high。

@@ -74,12 +74,12 @@ test("validateDisciplineMix errors when an algorithm chapter promises code but s
     "正文只讲原理，没有任何代码块。",
     course,
   );
-  assert.equal(issues.length, 1, JSON.stringify(issues));
-  assert.equal(issues[0]?.check, "discipline.code_mix");
-  assert.equal(issues[0]?.severity, "error");
+  const codeIssue = issues.find((issue) => issue.check === "discipline.code_mix");
+  assert.ok(codeIssue, JSON.stringify(issues));
+  assert.equal(codeIssue!.severity, "error");
 });
 
-test("validateDisciplineMix passes when runnable code is present", () => {
+test("validateDisciplineMix passes when runnable code and a figure are present", () => {
   const course = algorithmCourse();
   const issues = validateDisciplineMix(
     chapter("动态规划", {
@@ -91,7 +91,19 @@ test("validateDisciplineMix passes when runnable code is present", () => {
       requiredExamples: ["实现策略迭代"],
       requiredFormulas: [],
     }),
-    "讲解。\n```python\ndef policy_iteration():\n    return 0\n```\n逐行解释与预期输出。",
+    [
+      "讲解。",
+      "```python",
+      "def policy_iteration():",
+      "    return 0",
+      "```",
+      "逐行解释与预期输出。",
+      ":::learnbyai-figure",
+      "caption: 策略迭代流程",
+      "prompt: 画流程图",
+      "diagramSpec: 评估 -> 改进 -> 收敛",
+      ":::",
+    ].join("\n"),
     course,
   );
   assert.deepEqual(issues, []);
@@ -106,20 +118,51 @@ test("validateDisciplineMix ignores non-algorithm courses and contracts without 
   );
 
   course.discipline = "algorithm-engineering";
-  assert.deepEqual(
-    validateDisciplineMix(
-      chapter("概念章", {
-        chapterTitle: "概念章",
-        requiredTopics: ["概念辨析"],
-        bridgeFromPrevious: "承接",
-        bridgeToNext: "铺垫",
-        forbiddenEarlyTopics: [],
-        requiredExamples: ["手算例子"],
-        requiredFormulas: [],
-      }),
-      "没有代码的概念章。",
-      course,
-    ),
-    [],
+  // No code promise → no code_mix error; but a normal-depth chapter without
+  // any figure still gets the figure-floor warning.
+  const conceptIssues = validateDisciplineMix(
+    chapter("概念章", {
+      chapterTitle: "概念章",
+      requiredTopics: ["概念辨析"],
+      bridgeFromPrevious: "承接",
+      bridgeToNext: "铺垫",
+      forbiddenEarlyTopics: [],
+      requiredExamples: ["手算例子"],
+      requiredFormulas: [],
+    }),
+    "没有代码的概念章。",
+    course,
+  );
+  assert.ok(!conceptIssues.some((issue) => issue.check === "discipline.code_mix"), JSON.stringify(conceptIssues));
+  assert.ok(conceptIssues.some((issue) => issue.check === "discipline.figure_floor"), JSON.stringify(conceptIssues));
+});
+
+test("validateDisciplineMix warns when an algorithm core chapter has no figure", () => {
+  const course = algorithmCourse();
+  const coreChapter = chapter("策略梯度", {
+    chapterTitle: "策略梯度",
+    requiredTopics: ["策略梯度定理"],
+    bridgeFromPrevious: "承接",
+    bridgeToNext: "铺垫",
+    forbiddenEarlyTopics: [],
+    requiredExamples: ["推导"],
+    requiredFormulas: [],
+  });
+  coreChapter.depthWeight = "core";
+
+  const issues = validateDisciplineMix(coreChapter, "只有文字讲解。", course);
+  assert.ok(issues.some((issue) => issue.check === "discipline.figure_floor"), JSON.stringify(issues));
+
+  const withFigure = validateDisciplineMix(
+    coreChapter,
+    "文字讲解。\n:::learnbyai-figure\ncaption: 流程\nprompt: 画流程\ndiagramSpec: A -> B\n:::",
+    course,
+  );
+  assert.ok(!withFigure.some((issue) => issue.check === "discipline.figure_floor"), JSON.stringify(withFigure));
+
+  // Light chapters (intro/conclusion) are exempt from the figure floor.
+  coreChapter.depthWeight = "light";
+  assert.ok(
+    !validateDisciplineMix(coreChapter, "只有文字讲解。", course).some((issue) => issue.check === "discipline.figure_floor"),
   );
 });

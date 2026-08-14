@@ -76,9 +76,12 @@ export function qaGeneratedTex(tex: string): ExportQaIssue[] {
       continue;
     }
 
-    // Track display math; its body is legitimately raw.
+    // Track display math; its body is legitimately raw. A closer may carry
+    // content on the same line (markdownToTex closes on any line ending with
+    // $$, e.g. "E = mc^2$$"), so treat a $$-suffixed line as the closer —
+    // otherwise valid books would be flagged as unclosed.
     if (inDisplayMath) {
-      if (trimmed === "$$") inDisplayMath = false;
+      if (/\$\$\s*$/u.test(trimmed)) inDisplayMath = false;
       // Still track environment balance inside math so \begin{align} leaks surface.
       for (const match of line.matchAll(/\\(begin|end)\{([a-zA-Z*]+)\}/gu)) {
         const delta = match[1] === "begin" ? 1 : -1;
@@ -150,8 +153,8 @@ export function qaGeneratedTex(tex: string): ExportQaIssue[] {
   if (inDisplayMath) {
     issues.push({
       check: "export_qa.unclosed_math",
-      severity: "warning",
-      message: "文档末尾仍有未闭合的 $$ 数学块。",
+      severity: "error",
+      message: "文档末尾仍有未闭合的 $$ 数学块，XeLaTeX 会编译失败。",
       context: "unclosed $$ at end of TeX",
     });
   }
@@ -159,8 +162,8 @@ export function qaGeneratedTex(tex: string): ExportQaIssue[] {
     if (balance !== 0) {
       issues.push({
         check: "export_qa.unbalanced_env",
-        severity: "warning",
-        message: `环境 ${name} 的 \\begin/\\end 不平衡（差值 ${balance}）。`,
+        severity: "error",
+        message: `环境 ${name} 的 \\begin/\\end 不平衡（差值 ${balance}），XeLaTeX 会编译失败。`,
         context: `\\begin{${name}} balance ${balance}`,
       });
     }
@@ -267,8 +270,10 @@ export function formatQaWarnings(issues: ExportQaIssue[]) {
 
 /**
  * Error-severity findings are print defects (heading hashes printed raw, math
- * leaking into text mode, orphan subsubsection numbering). The exporter must
- * NOT deliver a PDF that contains them — treat them as blocking.
+ * leaking into text mode, orphan subsubsection numbering, unclosed display
+ * math, unbalanced environments — the latter two also fail the XeLaTeX
+ * compile outright). The exporter must NOT deliver a PDF that contains them
+ * — treat them as blocking.
  */
 export function hasBlockingExportQaIssues(issues: ExportQaIssue[]) {
   return issues.some((item) => item.severity === "error");

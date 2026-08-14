@@ -93,6 +93,20 @@ test("whole-book PDF export runs the blocking gate before XeLaTeX", async () => 
   );
 });
 
+test("whole-book PDF export blocks unbalanced environments before XeLaTeX", async () => {
+  const { createCourseExport, ExportQaBlockError } = await getExports();
+  // The display-math passthrough carries \begin{align} without a closer:
+  // qaGeneratedTex rates it unbalanced_env (error) and the gate must block
+  // BEFORE XeLaTeX, which would otherwise fail on it.
+  const course = makeCourse("$$\n\\begin{align}\nx &= 1\n$$");
+  await assert.rejects(
+    () => createCourseExport(course, "pdf", "user-export-block"),
+    (error: unknown) =>
+      error instanceof ExportQaBlockError &&
+      error.message.includes("阻断性") &&
+      error.message.includes("unbalanced_env"),
+  );
+});
 test("warning-only .tex export still delivers with warnings recorded", async () => {
   const { createCourseExport } = await getExports();
   const course = makeCourse("这一行有一个未闭合的 ` 反引号残留，只是警告。");

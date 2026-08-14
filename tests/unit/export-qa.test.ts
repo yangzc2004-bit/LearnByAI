@@ -63,13 +63,27 @@ test("qaGeneratedTex flags an orphan \\subsubsection (the 2.4.0.1 defect)", () =
   assert.ok(issues.some((item) => item.check === "export_qa.orphan_subsubsection"), JSON.stringify(issues));
 });
 
-test("qaGeneratedTex flags unbalanced environments and unclosed display math", () => {
+test("qaGeneratedTex flags unbalanced environments and unclosed display math as blocking errors", () => {
   const tex = ["\\chapter{A}", "\\section{B}", "\\begin{itemize}", "\\item x", "$$", "y = 1"].join("\n");
   const issues = qaGeneratedTex(tex);
   const checks = new Set(issues.map((item) => item.check));
   assert.ok(checks.has("export_qa.unbalanced_env"), JSON.stringify(issues));
   assert.ok(checks.has("export_qa.unclosed_math"), JSON.stringify(issues));
+  const env = issues.find((item) => item.check === "export_qa.unbalanced_env");
+  const math = issues.find((item) => item.check === "export_qa.unclosed_math");
+  assert.equal(env?.severity, "error", JSON.stringify(issues));
+  assert.equal(math?.severity, "error", JSON.stringify(issues));
+  assert.ok(hasBlockingExportQaIssues(issues));
 });
+
+test("qaGeneratedTex closes display math on a line ending with $$ (markdownToTex closer form)", () => {
+  // markdownToTex emits multi-line display math whose closer may carry
+  // content ("E = mc^2$$"). It must not be misread as unclosed — that
+  // would now block a valid book export.
+  const tex = ["\\chapter{A}", "\\section{B}", "$$", "E = mc^2$$", "正文继续。"].join("\n");
+  assert.deepEqual(qaGeneratedTex(tex), []);
+});
+
 
 test("qaChapterMarkdownForExport flags \\$ residue, backticks, unpaired $, and heading skips", () => {
   const md = [

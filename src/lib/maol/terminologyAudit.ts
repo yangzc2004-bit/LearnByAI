@@ -60,9 +60,11 @@ const MAX_JUDGE_PAIRS = 60;
  */
 export function extractCjkGrams(content: string): Map<string, number> {
   const counts = new Map<string, number>();
-  for (const match of content.matchAll(/[\u4e00-\u9fff]{4,16}/gu)) {
+  // 3-char windows feed a dedicated low-priority candidate tier (同策略/在策略
+  // class); 4-8 char windows remain the primary tier.
+  for (const match of content.matchAll(/[\u4e00-\u9fff]{3,16}/gu)) {
     const run = match[0];
-    for (let size = 4; size <= Math.min(8, run.length); size += 1) {
+    for (let size = 3; size <= Math.min(8, run.length); size += 1) {
       for (let start = 0; start + size <= run.length; start += 1) {
         const gram = run.slice(start, start + size);
         counts.set(gram, (counts.get(gram) ?? 0) + 1);
@@ -96,10 +98,13 @@ export function generateChapterCandidatePairs(
   content: string,
   title?: string,
   maxPairs = 300,
-): { variants: string[]; rare: number; imbalance: number; total: number; title: boolean }[] {
+): { variants: string[]; rare: number; imbalance: number; total: number; title: boolean; minLen: number }[] {
   const counts = extractCjkGrams(content);
+  // 3-char windows are noisy (cross-word shards), so they need a higher
+  // frequency bar to enter the frequent set — and even then they rank below
+  // all 4+ char pairs in the judge's list.
   const frequent = [...counts.entries()]
-    .filter(([, count]) => count >= 2)
+    .filter(([gram, count]) => (gram.length >= 4 ? count >= 2 : count >= 3))
     .sort((a, b) => b[1] - a[1])
     .slice(0, 400);
   const byLength = new Map<number, string[]>();
@@ -108,17 +113,20 @@ export function generateChapterCandidatePairs(
     list.push(gram);
     byLength.set(gram.length, list);
   }
-  const titleGrams = title ? [...extractCjkGrams(title).keys()] : [];
+  const titleGrams = title
+    ? [...extractCjkGrams(title).keys()].filter((gram) => gram.length >= 4)
+    : [];
 
-  const pairs = new Map<string, { variants: string[]; rare: number; imbalance: number; total: number; title: boolean }>();
+  const pairs = new Map<string, { variants: string[]; rare: number; imbalance: number; total: number; title: boolean; minLen: number }>();
   const addPair = (a: string, aCount: number, b: string, bCount: number, title: boolean) => {
     if (a === b || !isNearDuplicate(a, b)) return;
     const rare = Math.min(aCount, bCount);
     const imbalance = Math.abs(aCount - bCount);
+    const minLen = Math.min(a.length, b.length);
     const key = [a, b].sort().join("\u0000");
     const existing = pairs.get(key);
     if (!existing || title || rare < existing.rare || (rare === existing.rare && aCount + bCount > existing.total)) {
-      pairs.set(key, { variants: [a, b], rare, imbalance, total: aCount + bCount, title: title || existing?.title || false });
+      pairs.set(key, { variants: [a, b], rare, imbalance, total: aCount + bCount, title: title || existing?.title || false, minLen });
     }
   };
 
@@ -141,6 +149,7 @@ export function generateChapterCandidatePairs(
     .sort(
       (a, b) =>
         Number(b.title) - Number(a.title) ||
+        Number(b.minLen >= 4) - Number(a.minLen >= 4) ||
         a.rare - b.rare ||
         b.total - a.total ||
         a.imbalance - b.imbalance,
@@ -154,11 +163,11 @@ export function generateChapterCandidatePairs(
  * signature), then total frequency descending.
  */
 export function rankBookCandidates(
-  chapterPairs: { variants: string[]; rare: number; imbalance: number; total: number; title: boolean }[][],
+  chapterPairs: { variants: string[]; rare: number; imbalance: number; total: number; title: boolean; minLen: number }[][],
   chapterContents: string[],
   maxPairs = 60,
 ) {
-  const merged = new Map<string, { variants: string[]; rare: number; imbalance: number; total: number; title: boolean }>();
+  const merged = new Map<string, { variants: string[]; rare: number; imbalance: number; total: number; title: boolean; minLen: number }>();
   for (const pairs of chapterPairs) {
     for (const pair of pairs) {
       const key = pair.variants.sort().join("\u0000");
@@ -168,7 +177,7 @@ export function rankBookCandidates(
       }
     }
   }
-  return [...merged.values()]
+  const ranked = [...merged.values()]
     .map((pair) => {
       // Ranking counts use the BODY only: title occurrences would inflate the
       // rare side (title 马尔科夫 + body 马尔科夫 = rare 2) and push the pair
@@ -183,18 +192,25 @@ export function rankBookCandidates(
         imbalance: Math.abs((counts[0] ?? 0) - (counts[1] ?? 0)),
         total: (counts[0] ?? 0) + (counts[1] ?? 0),
         title: pair.title,
+        minLen: pair.minLen,
       };
     })
     .filter((pair) => pair.total > 0)
     .sort(
       (a, b) =>
         Number(b.title) - Number(a.title) ||
+        Number(b.minLen >= 4) - Number(a.minLen >= 4) ||
         a.rare - b.rare ||
         b.total - a.total ||
         a.imbalance - b.imbalance,
-    )
-    .slice(0, maxPairs)
-    .map((pair) => ({ variants: pair.variants }));
+    );
+
+  // 3-char pairs get a small reserved block so the shard flood of 4+ char
+  // pairs can never starve the 同策略/在策略 class entirely.
+  const longSlots = Math.max(0, maxPairs - 15);
+  const longPairs = ranked.filter((pair) => pair.minLen >= 4).slice(0, longSlots);
+  const shortPairs = ranked.filter((pair) => pair.minLen === 3).slice(0, 15);
+  return [...longPairs, ...shortPairs].map((pair) => ({ variants: pair.variants }));
 }
 
 /** Extract a short real sentence of context around the first occurrence. */
@@ -284,6 +300,50 @@ export function parseConflictGroups(raw: string): { key: string; variants: strin
 }
 
 /**
+ * Whitelist the LLM judge's same:true decisions against the deterministic
+ * candidate pairs the judge was actually shown. A confirmed pair that is
+ * NOT in the candidate set is a hallucination (e.g. 强化学习/机器学习,
+ * which the candidate stage never produced because it is not a
+ * one-character-difference pair) — it is moved to rejected and can never
+ * reach the book-wide replacement pass.
+ *
+ * Pair ORDER is normalized by sorting, so a judge that flips the two
+ * variants still matches. Length and same-chapter evidence checks are
+ * inherent to the whitelist: only candidate-stage pairs (same length,
+ * same-chapter co-occurrence) ever enter it.
+ */
+export function filterAllowedConflictGroups(
+  decisions: ReturnType<typeof parseConflictGroups>,
+  candidates: { variants: string[] }[],
+): { groups: { key: string; variants: string[] }[]; rejected: TerminologyAuditReport["rejected"] } {
+  const allowedPairKeys = new Set(
+    candidates.map((candidate) => [...candidate.variants].sort().join("\u0000")),
+  );
+  const groups: { key: string; variants: string[] }[] = [];
+  const rejected: TerminologyAuditReport["rejected"] = [];
+
+  for (const decision of decisions) {
+    if (!decision.same) {
+      if (decision.reason || decision.variants.length >= 2) {
+        rejected.push({ variants: decision.variants, reason: decision.reason || "判定为不同概念，已跳过。" });
+      }
+      continue;
+    }
+    const normalized = [...decision.variants].sort();
+    if (normalized.length === 2 && allowedPairKeys.has(normalized.join("\u0000"))) {
+      groups.push({ key: decision.key, variants: decision.variants });
+    } else {
+      rejected.push({
+        variants: decision.variants,
+        reason: "模型返回了未经过确定性候选筛选的词对（幻觉防护），已拒绝全书替换。",
+      });
+    }
+  }
+
+  return { groups, rejected };
+}
+
+/**
  * Merge groups that share a variant (transitive closure): "多步回报/n步回报"
  * + "n步回报/n步回溯" must become ONE group, otherwise the same spelling gets
  * two contradictory replacement targets.
@@ -329,6 +389,28 @@ export function mergeTransitiveGroups(
     .map((set) => [...set])
     .filter((variants) => variants.length >= 2)
     .map((variants) => ({ key: variants.join("\u0000"), variants }));
+}
+
+/**
+ * Collapse substring-redundant conflict groups for DISPLAY: the 马尔科夫
+ * family produces a near-duplicate row per window (马尔科夫/马尔可夫,
+ * 马尔科夫决/马尔可夫决, 马尔科夫决策过程/马尔可夫决策过程, …). A group is
+ * subsumed when every variant is a proper substring of some variant of a
+ * longer group — only the maximal groups are shown. Replacements are NOT
+ * collapsed (longest-first application still needs the short pairs for bare
+ * occurrences).
+ */
+export function collapseSubstringConflicts(conflicts: TerminologyConflict[]): TerminologyConflict[] {
+  return conflicts.filter(
+    (group) =>
+      !conflicts.some(
+        (other) =>
+          other !== group &&
+          group.variants.every((variant) =>
+            other.variants.some((longer) => longer.length > variant.length && longer.includes(variant)),
+          ),
+      ),
+  );
 }
 
 /** Map verified conflict groups into book-wide conflicts and locate chapters.
@@ -576,15 +658,14 @@ export async function runTerminologyAudit(
       mock: () => JSON.stringify({ groups: [] }),
     });
 
-    const rejected: TerminologyAuditReport["rejected"] = [];
-    const groups: { key: string; variants: string[] }[] = [];
-    for (const decision of parseConflictGroups(judgeRaw)) {
-      if (decision.same) {
-        groups.push({ key: decision.key, variants: decision.variants });
-      } else if (decision.reason || decision.variants.length >= 2) {
-        rejected.push({ variants: decision.variants, reason: decision.reason || "判定为不同概念，已跳过。" });
-      }
-    }
+    // The judge may only CONFIRM pairs the deterministic candidate stage
+    // produced and showed it. Anything else (e.g. a hallucinated
+    // 强化学习/机器学习) goes to rejected — it must never reach the
+    // book-wide replacement pass.
+    const { groups, rejected } = filterAllowedConflictGroups(
+      parseConflictGroups(judgeRaw),
+      candidates,
+    );
 
     // Transitive merge: a spelling shared by two groups must resolve to ONE
     // canonical target, never two contradictory replacements.
@@ -600,7 +681,13 @@ export async function runTerminologyAudit(
     );
 
     if (replacements.length === 0) {
-      return { status: "ok", conflicts: resolved, rejected, replacements: [], appliedToChapters: [] };
+      return {
+        status: "ok",
+        conflicts: collapseSubstringConflicts(resolved),
+        rejected,
+        replacements: [],
+        appliedToChapters: [],
+      };
     }
 
     // Apply to EVERY chapter (not just chapters with content): a spelling
@@ -629,7 +716,7 @@ export async function runTerminologyAudit(
 
     return {
       status: "ok",
-      conflicts: resolved,
+      conflicts: collapseSubstringConflicts(resolved),
       rejected,
       replacements,
       appliedToChapters,

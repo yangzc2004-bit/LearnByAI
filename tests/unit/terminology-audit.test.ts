@@ -6,9 +6,11 @@ import {
   buildConflictJudgementPrompt,
   buildConflictMap,
   chooseCanonicalReplacements,
+  collapseSubstringConflicts,
   countVariantOccurrences,
   excerptAround,
   extractCjkGrams,
+  filterAllowedConflictGroups,
   generateChapterCandidatePairs,
   mergeTransitiveGroups,
   parseConflictGroups,
@@ -41,14 +43,53 @@ test("rankBookCandidates ranks title conflicts and rare-side pairs first", () =>
   const content = "同义甲 同义乙 ".repeat(20) + "马尔可夫决策过程 ".repeat(28) + "马尔科夫决策过程 " + "马尔可夫 ".repeat(64) + "马尔科夫";
   const ranked = rankBookCandidates(
     [
-      [{ variants: ["同义甲", "同义乙"], rare: 20, imbalance: 3, total: 43, title: false }],
-      [{ variants: ["马尔可夫", "马尔科夫"], rare: 1, imbalance: 64, total: 65, title: false }],
-      [{ variants: ["马尔可夫决策过程", "马尔科夫决策过程"], rare: 1, imbalance: 28, total: 29, title: true }],
+      [{ variants: ["同义甲", "同义乙"], rare: 20, imbalance: 3, total: 43, title: false, minLen: 4 }],
+      [{ variants: ["马尔可夫", "马尔科夫"], rare: 1, imbalance: 64, total: 65, title: false, minLen: 4 }],
+      [{ variants: ["马尔可夫决策过程", "马尔科夫决策过程"], rare: 1, imbalance: 28, total: 29, title: true, minLen: 7 }],
     ],
     [content],
   );
   assert.deepEqual(ranked[0]?.variants, ["马尔可夫决策过程", "马尔科夫决策过程"], JSON.stringify(ranked));
   assert.deepEqual(ranked[1]?.variants, ["马尔可夫", "马尔科夫"], JSON.stringify(ranked));
+});
+
+test("collapseSubstringConflicts keeps only maximal groups for display", () => {
+  const conflicts = [
+    { key: "a", variants: ["马尔可夫", "马尔科夫"], occurrences: 67, chapters: [1, 3] },
+    { key: "b", variants: ["马尔可夫决", "马尔科夫决"], occurrences: 30, chapters: [1, 3] },
+    { key: "c", variants: ["马尔可夫决策过程", "马尔科夫决策过程"], occurrences: 29, chapters: [1, 3] },
+    { key: "d", variants: ["同策略", "在策略"], occurrences: 40, chapters: [3] },
+  ];
+  const collapsed = collapseSubstringConflicts(conflicts);
+  assert.deepEqual(collapsed.map((group) => group.key), ["c", "d"], JSON.stringify(collapsed));
+});
+
+test("generateChapterCandidatePairs includes 3-char pairs only for frequent terms", () => {
+  const content = "同策略学习。同策略更新。同策略方法。在策略学习。在策略更新。在策略方法。";
+  const pairs = generateChapterCandidatePairs(content);
+  const flat = pairs.map((pair) => pair.variants.sort().join("/"));
+  assert.ok(flat.includes("同策略/在策略"), JSON.stringify(flat));
+});
+
+test("rankBookCandidates reserves slots for 3-char pairs", () => {
+  const longPairs = Array.from({ length: 45 }, (_, i) => ({
+    variants: [`价值甲${i}`, `价值乙${i}`],
+    rare: 1,
+    imbalance: 1,
+    total: 2,
+    title: false,
+    minLen: 5,
+  }));
+  const content =
+    "同策略 ".repeat(10) + "在策略 ".repeat(8) + longPairs.map((pair) => pair.variants.join(" ")).join(" ");
+  const ranked = rankBookCandidates(
+    [[{ variants: ["同策略", "在策略"], rare: 8, imbalance: 2, total: 18, title: false, minLen: 3 }], longPairs],
+    [content],
+    60,
+  );
+  // 45 slots for 4+ char pairs, 15 for 3-char; the 3-char pair must be judged.
+  assert.ok(ranked.some((pair) => pair.variants.join("/") === "同策略/在策略"), JSON.stringify(ranked.slice(-3)));
+  assert.equal(ranked.length, 46, "45 long + 1 short");
 });
 
 test("excerptAround returns a short real context around the token", () => {
@@ -76,6 +117,51 @@ test("parseConflictGroups parses evidence-judge decisions", () => {
 test("parseConflictGroups rejects non-JSON", () => {
   assert.deepEqual(parseConflictGroups("not json"), []);
 });
+
+test("filterAllowedConflictGroups lets a judge-confirmed candidate pair through, order-insensitive", () => {
+  const { groups, rejected } = filterAllowedConflictGroups(
+    [{ key: "马尔科夫\u0000马尔可夫", variants: ["马尔科夫", "马尔可夫"], same: true, reason: "同为 Markov 译名" }],
+    [{ variants: ["马尔可夫", "马尔科夫"] }],
+  );
+  assert.deepEqual(groups, [{ key: "马尔科夫\u0000马尔可夫", variants: ["马尔科夫", "马尔可夫"] }]);
+  assert.deepEqual(rejected, []);
+});
+
+test("filterAllowedConflictGroups rejects a hallucinated pair outside the candidate whitelist", () => {
+  // 强化学习/机器学习 is not a one-character-difference pair — the
+  // deterministic candidate stage never produced it. The judge confirming
+  // it anyway must land in rejected, never in the replacement pipeline.
+  const { groups, rejected } = filterAllowedConflictGroups(
+    [{ key: "强化学习\u0000机器学习", variants: ["强化学习", "机器学习"], same: true, reason: "同一领域" }],
+    [{ variants: ["马尔可夫", "马尔科夫"] }, { variants: ["同策略", "在策略"] }],
+  );
+  assert.deepEqual(groups, []);
+  assert.equal(rejected.length, 1, JSON.stringify(rejected));
+  assert.deepEqual(rejected[0]?.variants, ["强化学习", "机器学习"]);
+  assert.match(rejected[0]?.reason ?? "", /候选筛选/);
+});
+
+test("filterAllowedConflictGroups rejects multi-variant confirmations not present as a pair", () => {
+  const { groups, rejected } = filterAllowedConflictGroups(
+    [
+      { key: "a", variants: ["马尔可夫", "马尔科夫", "马可夫"], same: true, reason: "同一概念" },
+      { key: "b", variants: ["同策略", "在策略"], same: true, reason: "同义" },
+    ],
+    [{ variants: ["马尔可夫", "马尔科夫"] }],
+  );
+  assert.deepEqual(groups, []);
+  assert.equal(rejected.length, 2, JSON.stringify(rejected));
+});
+
+test("filterAllowedConflictGroups keeps same:false rejections unchanged", () => {
+  const { groups, rejected } = filterAllowedConflictGroups(
+    [{ key: "c", variants: ["硬更新", "软更新"], same: false, reason: "反义词" }],
+    [],
+  );
+  assert.deepEqual(groups, []);
+  assert.deepEqual(rejected, [{ variants: ["硬更新", "软更新"], reason: "反义词" }]);
+});
+
 
 test("mergeTransitiveGroups unions groups that share a spelling", () => {
   const merged = mergeTransitiveGroups([

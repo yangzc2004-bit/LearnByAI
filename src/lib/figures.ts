@@ -9,6 +9,18 @@ const FIGURE_BLOCK_RE = /:::learnbyai-figure[^\n]*\n([\s\S]*?)\n:::/gu;
 const MAX_FIGURE_CAPTION = 80;
 
 /**
+ * Route a figure placeholder to its renderer. Structured diagrams (a
+ * diagramSpec exists and text labels are allowed) must be programmatic —
+ * AI bitmaps blur and mangle labeled structure. Intent-only illustrations
+ * (no diagramSpec, or labels explicitly disallowed) go to the image model
+ * when one is configured.
+ */
+export function figureModeFor(placeholder: FigurePlaceholder, modelAvailable: boolean): ImageGenerationMode {
+  if (placeholder.diagramSpec && placeholder.textLabelsAllowed !== false) return "code";
+  return modelAvailable ? "model" : "code";
+}
+
+/**
  * Matches a rendered figure in chapter Markdown: `![图 N.M caption](url)` plus
  * the optional `*图 N.M caption*` line below it. Accepts both the current dot
  * label (图 1.2) and the legacy dash label (图 1-2) written by the earlier
@@ -71,7 +83,7 @@ export async function processChapterFigures(input: {
   const blocks = parseFigurePlaceholders(content);
   if (blocks.length === 0) return { content, assets: [], skipped: [] };
 
-  const mode: ImageGenerationMode = getUserImageModelConfig(input.overrides) ? "model" : "code";
+  const modelAvailable = Boolean(getUserImageModelConfig(input.overrides));
   const chapterIndex = Math.max(0, input.course.chapters.findIndex((item) => item.id === input.chapter.id));
   const chapterNumber = chapterIndex + 1;
   const assets: FigureAsset[] = [];
@@ -83,6 +95,10 @@ export async function processChapterFigures(input: {
   for (const block of blocks) {
     next += content.slice(last, block.start);
     const placeholder = block.placeholder;
+    // Per-figure routing: structured diagrams carrying text labels (diagramSpec
+    // present, labels allowed) are drawn programmatically — vector-crisp with
+    // correct text. AI bitmaps are reserved for intent-only illustrations.
+    const mode = figureModeFor(placeholder, modelAvailable);
     const figureNumber = countRenderedFigures(content.slice(0, block.start)) + successfulInsertedBefore + 1;
     const label = `图 ${chapterNumber}.${figureNumber}`;
     const now = new Date().toISOString();
@@ -227,7 +243,7 @@ export async function regenerateChapterFigure(input: {
   placeholder: FigurePlaceholder;
   overrides?: ModelOverrides;
 }): Promise<FigureAsset> {
-  const mode: ImageGenerationMode = getUserImageModelConfig(input.overrides) ? "model" : "code";
+  const mode = figureModeFor(input.placeholder, Boolean(getUserImageModelConfig(input.overrides)));
   const generated = mode === "model"
     ? await generateModelFigure(input.placeholder, input.overrides)
     : generateCodeFigure(input.placeholder, input.label);
@@ -308,8 +324,9 @@ async function generateModelFigure(placeholder: FigurePlaceholder, overrides?: M
     [
       "Create a clean academic textbook illustration.",
       "White background, muted palette, precise layout, no marketing poster style, no watermark.",
-      "Use short simplified-Chinese labels only when helpful; avoid long sentences inside the image.",
-      `Caption: ${placeholder.caption}`,
+      "STRICT TEXT RULE: never draw sentences, titles, captions or captions inside the image. At most 2-6 character short labels.",
+      "The caption below the image is typeset separately — do not duplicate it inside the artwork.",
+      `Caption (for context only, do not draw it): ${placeholder.caption}`,
       `Content intent: ${placeholder.prompt}`,
       placeholder.diagramSpec ? `Diagram specification: ${placeholder.diagramSpec}` : "",
     ].filter(Boolean).join("\n"),
@@ -335,9 +352,70 @@ function normalizeFigureExt(ext: string): GeneratedFigureImage["ext"] {
 }
 
 function renderCodeFigureSvg(placeholder: FigurePlaceholder, label: string) {
+  const title = normalizeCaption(placeholder.caption);
+  // Structured specs written as chains ("策略评估 -> 策略改进 -> 收敛") render
+  // as a real vertical flowchart with correct text — vector-crisp, no AI text.
+  const chain = parseFlowChain(placeholder.diagramSpec);
+  if (chain) return renderFlowSvg(chain, title, label);
+  return renderRowSvg(placeholder, title, label);
+}
+
+/** "A -> B -> C" style chains (also →, =>, -->) → flowchart nodes. */
+export function parseFlowChain(diagramSpec: string | undefined): string[] | undefined {
+  if (!diagramSpec) return undefined;
+  const chain = diagramSpec
+    .split(/\s*(?:->|-->|=>|→|⇒)\s*/u)
+    .map((part) => part.replace(/[（(][^）)]*[)）]/gu, "").replace(/[【】\[\]]/gu, "").trim())
+    .filter((part) => part.length >= 2)
+    .map((part) => part.slice(0, 16));
+  return chain.length >= 2 ? chain.slice(0, 6) : undefined;
+}
+
+function renderFlowSvg(nodes: string[], title: string, label: string) {
+  const width = 920;
+  const boxWidth = 560;
+  const boxHeight = 72;
+  const gap = 44;
+  const startX = (width - boxWidth) / 2;
+  const top = 150;
+  const height = top + nodes.length * (boxHeight + gap) + 90;
+
+  const items = nodes.map((node, index) => ({ text: node, y: top + index * (boxHeight + gap) }));
+  const arrows = items.slice(0, -1).map((item) => {
+    const y1 = item.y + boxHeight;
+    const y2 = y1 + gap;
+    const x = width / 2;
+    return `<line x1="${x}" y1="${y1 + 4}" x2="${x}" y2="${y2 - 10}" stroke="#a7b0ba" stroke-width="2.5" marker-end="url(#arrow)" />`;
+  }).join("\n");
+  const boxes = items.map((item, index) => {
+    const fill = index === 0 ? "#fff8ea" : index === items.length - 1 ? "#eef7f4" : "#f7f8fa";
+    const stroke = index === 0 ? "#d9a336" : index === items.length - 1 ? "#4b9a8f" : "#cfd6dd";
+    return [
+      `<rect x="${startX}" y="${item.y}" width="${boxWidth}" height="${boxHeight}" rx="10" fill="${fill}" stroke="${stroke}" stroke-width="2" />`,
+      wrapSvgText(item.text, width / 2, item.y + 32, boxWidth - 48, 20, "#1f2933"),
+    ].join("\n");
+  }).join("\n");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeXml(title)}">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a7b0ba" />
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff" />
+  <rect x="24" y="24" width="${width - 48}" height="${height - 48}" rx="18" fill="#ffffff" stroke="#e1e6eb" />
+  <text x="60" y="88" fill="#6b7582" font-size="18" font-family="Microsoft YaHei, Segoe UI, Arial">LearnByAI · 代码渲染图</text>
+  ${wrapSvgText(title, width / 2, 122, width - 180, 28, "#151922", true)}
+  ${arrows}
+  ${boxes}
+  <text x="${width / 2}" y="${height - 40}" text-anchor="middle" fill="#8a95a3" font-size="18" font-family="Microsoft YaHei, Segoe UI, Arial">${escapeXml(label)}　${escapeXml(title)}</text>
+</svg>`;
+}
+
+function renderRowSvg(placeholder: FigurePlaceholder, title: string, label: string) {
   const width = 920;
   const height = 500;
-  const title = normalizeCaption(placeholder.caption);
   const nodes = extractNodes(placeholder.diagramSpec || placeholder.prompt || title).slice(0, 5);
   const nodeCount = Math.max(3, nodes.length);
   const gap = 36;

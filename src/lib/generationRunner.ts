@@ -449,6 +449,7 @@ export async function runChapterGenerationJob(input: {
           qualityReport: illustratedResponse.qualityReport,
           status: illustratedResponse.qualityReport.status === "failed" ? "quality_failed" : "ready",
           generationJobId: illustratedResponse.job?.id ?? job.id,
+          ...(illustratedResponse.exerciseAnswers ? { exerciseAnswers: illustratedResponse.exerciseAnswers } : {}),
         },
         input.request,
       );
@@ -623,6 +624,7 @@ async function runDraftReviewChapterJob(input: {
           qualityReport: illustratedResponse.qualityReport,
           status: illustratedResponse.qualityReport.status === "failed" ? "quality_failed" : "ready",
           generationJobId: illustratedResponse.job?.id ?? job.id,
+          ...(illustratedResponse.exerciseAnswers ? { exerciseAnswers: illustratedResponse.exerciseAnswers } : {}),
         },
         request,
       );

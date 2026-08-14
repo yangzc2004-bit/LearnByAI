@@ -11,7 +11,7 @@ import { useRevise } from "@/lib/hooks/useRevise";
 import { apiFetch, subscribeToSse } from "@/lib/clientApi";
 import { publicSafeErrorMessage } from "@/lib/publicSafeError";
 import { formatMinutes, totalMinutes } from "@/lib/time";
-import { AgentEvent, Chapter, ChapterGenerateResponse, Course, EntityStatus, GenerationJob, Section } from "@/lib/types";
+import { AgentEvent, Chapter, ChapterGenerateResponse, Course, EntityStatus, ExerciseAnswer, GenerationJob, Section } from "@/lib/types";
 import { effectiveChapterStatus, hasChapterBody, isChapterAwaitingQuality, isChapterReadable } from "@/lib/chapterReadiness";
 import { stageForEvent } from "@/components/generation-studio/helpers";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -110,6 +110,31 @@ function awaitingQualityMessage(event?: AgentEvent) {
   if (stage.agent === "FORMAT") return "本章草稿已生成，正在整理 Markdown、公式与标题格式...";
   if (stage.agent === "REPAIRER") return "本章草稿已生成，正在自动返修质检发现的问题...";
   return "本章草稿已生成，正在由 REVIEWER 进行质量检查...";
+}
+
+function isExerciseSection(section: Section) {
+  const title = section.title.replace(/^\d+(?:\.\d+)*\s*/u, "").replace(/\s+/gu, "");
+  return /^(练习|习题|思考与练习|课后练习|练习与思考)$/u.test(title);
+}
+
+function ExerciseAnswersBlock({ answers }: { answers: ExerciseAnswer[] }) {
+  return (
+    <div className="mt-6 rounded-lg border border-border bg-card p-4 print:hidden">
+      <details>
+        <summary className="cursor-pointer text-sm font-medium text-foreground hover:text-primary">
+          查看练习参考解答（{answers.length} 题，由解答 pass 生成，建议先独立完成）
+        </summary>
+        <ol className="mt-3 list-decimal space-y-4 pl-5">
+          {answers.map((answer) => (
+            <li key={answer.questionIndex} className="text-sm leading-relaxed">
+              <p className="mb-1 font-medium text-muted-foreground">第 {answer.questionIndex} 题</p>
+              <MarkdownContent content={answer.answer} />
+            </li>
+          ))}
+        </ol>
+      </details>
+    </div>
+  );
 }
 
 export default function ReaderPage() {
@@ -801,11 +826,19 @@ export default function ReaderPage() {
                   {sections.map((section) => (
                     <section key={section.id} id={`section-${section.id}`} data-section-id={section.id}>
                       <MarkdownContent content={section.content} />
+                      {isExerciseSection(section) && chapter.exerciseAnswers?.length ? (
+                        <ExerciseAnswersBlock answers={chapter.exerciseAnswers} />
+                      ) : null}
                     </section>
                   ))}
                 </div>
               ) : (
-                <MarkdownContent content={content} />
+                <>
+                  <MarkdownContent content={content} />
+                  {chapter.exerciseAnswers?.length ? (
+                    <ExerciseAnswersBlock answers={chapter.exerciseAnswers} />
+                  ) : null}
+                </>
               )}
             </article>
           )}

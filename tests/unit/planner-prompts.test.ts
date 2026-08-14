@@ -4,7 +4,9 @@ import {
   buildCourseBiblePrompt,
   buildCourseSkeletonPrompt,
 } from "../../src/lib/prompts/coursePlanner";
+import { buildChapterReviewPrompt } from "../../src/lib/prompts/chapterReviewer";
 import type { CourseSkeleton } from "../../src/lib/prompts/coursePlanner";
+import type { Chapter, Course } from "../../src/lib/types";
 
 const input = {
   topic: "强化学习",
@@ -36,4 +38,34 @@ test("bible prompt requires a polished goalStatement", () => {
   const prompt = buildCourseBiblePrompt(input, skeleton);
   assert.ok(prompt.includes('"goalStatement"'), prompt);
   assert.ok(prompt.includes("封面副标题与前言"), prompt);
+});
+
+test("reviewer prompt requires named concepts and suspect grounding", () => {
+  const course = {
+    id: "c",
+    topic: "强化学习",
+    goal: "掌握核心算法",
+    background: "",
+    styles: [],
+    learningMode: "guided",
+    chapterCount: 3,
+    difficulty: "intermediate",
+    profile: "",
+    courseBible: {
+      targetLearner: "",
+      finalOutcomes: [],
+      teachingStyle: "",
+      prerequisites: [],
+      globalNarrative: "",
+      terminology: [],
+      chapterDependencies: [],
+    },
+    chapters: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+  } as unknown as Course;
+  const chapter = { id: "ch", title: "多臂老虎机", description: "" } as unknown as Chapter;
+  const prompt = buildChapterReviewPrompt(course, chapter, "正文。");
+  assert.ok(prompt.includes("namedConcepts"), prompt);
+  assert.ok(prompt.includes("suspectConcepts"), prompt);
+  assert.ok(prompt.includes("查无出处"), prompt);
 });
