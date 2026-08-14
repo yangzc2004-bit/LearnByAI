@@ -92,6 +92,25 @@ ${meta.outline?.bookOutlineMarkdown ?? "未提供"}
 ${sectionOutline ? `本章已确认的小节大纲（正文主题小节必须按此展开、编号一致）：\n${sectionOutline}\n` : ""}`;
 }
 
+/**
+ * Per-discipline content-mix rules: what the chapter must deliver to count as
+ * "learnable" in this discipline. Algorithm courses are judged by runnable
+ * code, theory courses by complete derivation chains, data courses by
+ * end-to-end pipelines. Deterministic TQH checks mirror these rules.
+ */
+function disciplineMixRules(course: Course) {
+  switch (course.discipline) {
+    case "algorithm-engineering":
+      return "- 学科配比（算法/工程类，硬性）：本章契约要求的每个核心算法都必须配一个可运行的代码示例——使用可执行语言（如 python、r、julia、matlab），禁止用伪代码、注释占位或「示意代码」冒充。每段代码前后必须逐行讲解其作用，并描述一次运行后的预期输出。若本章契约允许代码实现细节，代码块数量不得少于核心算法数；正文讲解文字仍是主体，代码是佐证。";
+    case "theory-math":
+      return "- 学科配比（理论/数学类，硬性）：每个关键结论必须给出完整的推导链条——先陈述定理或命题，再给出从假设到结论的关键推导步骤（不跳步），最后说明适用边界与反例。推导链条不完整视为本章不合格。";
+    case "data-science":
+      return "- 学科配比（数据科学类，硬性）：核心方法必须配端到端数据处理流程——可运行代码 + 数据形状说明 + 一次运行后的预期输出，并给出实验结果解读，而不是只讲原理。";
+    default:
+      return "";
+  }
+}
+
 export function buildChapterWriterPrompt(
   course: Course,
   chapter: Chapter,
@@ -166,6 +185,7 @@ textLabelsAllowed: true
 - 不重复引入：terminology 中 introducedIn 指向本章之前章节的术语，直接使用，不要当作首次出现重新括注定义；只有本章首次引入的术语才展开解释。
 - 若本章是全书收尾「总结与展望」章：以回顾主线、串联各章、指出前沿与后续学习方向为主，不展开新的概念或推导。
 - 开头要自然承接上一章，结尾要自然为下一章铺垫，但不要把这些写成机械标题。
+${disciplineMixRules(course)}
 
 课程信息：
 主题：${course.topic}

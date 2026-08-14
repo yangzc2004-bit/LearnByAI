@@ -1,5 +1,6 @@
-import { Chapter, QualityIssue, QualityReport, QualityStatus } from "../types";
+import { Chapter, Course, QualityIssue, QualityReport, QualityStatus } from "../types";
 import { validateContinuity } from "./continuity";
+import { validateDisciplineMix } from "./discipline";
 import { validateFactLite } from "./fact-lite";
 import { validateFormat } from "./format";
 import { validateStructure } from "./structure";
@@ -7,12 +8,13 @@ import { shouldAcceptQualityCandidate } from "./candidate";
 
 const MAX_SELF_REPAIR_ATTEMPTS = 1;
 
-export function runChapterQualityPipeline(chapter: Chapter, content: string): QualityReport {
+export function runChapterQualityPipeline(chapter: Chapter, content: string, course?: Course): QualityReport {
   const issues = [
     ...validateStructure(content),
     ...validateFormat(content),
     ...validateContinuity(chapter),
     ...validateFactLite(content),
+    ...validateDisciplineMix(chapter, content, course),
   ];
 
   const score = scoreIssues(issues);
@@ -38,16 +40,17 @@ export function runChapterQualityPipelineWithRepair(
   chapter: Chapter,
   content: string,
   repair: (content: string) => string,
+  course?: Course,
 ) {
   let nextContent = content;
-  let report = runChapterQualityPipeline(chapter, nextContent);
+  let report = runChapterQualityPipeline(chapter, nextContent, course);
   let attempts = 0;
 
   while (report.status === "failed" && attempts < MAX_SELF_REPAIR_ATTEMPTS && canRepair(report.issues)) {
     attempts += 1;
     const repaired = repair(nextContent);
     if (repaired === nextContent) break;
-    const repairedReport = runChapterQualityPipeline(chapter, repaired);
+    const repairedReport = runChapterQualityPipeline(chapter, repaired, course);
     if (!shouldAcceptQualityCandidate(report, repairedReport)) break;
     nextContent = repaired;
     report = repairedReport;

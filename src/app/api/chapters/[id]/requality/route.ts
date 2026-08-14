@@ -45,6 +45,7 @@ export async function POST(
       chapter,
       content,
       postRepairMarkdown,
+      course,
     );
     await saveServerQualityReport(report, request);
     const updatedCourse = await updateServerChapter(

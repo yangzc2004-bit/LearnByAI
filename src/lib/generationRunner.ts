@@ -20,6 +20,7 @@ import {
   updateServerChapter,
 } from "./serverStore";
 import { Chapter, ChapterGenerateResponse, Course, GenerationJob, QualityReport, TextbookMeta } from "./types";
+import { stripYearTagFromTitle } from "./titleReview";
 
 type ChapterGenerationJobResult = {
   error?: string;
@@ -904,7 +905,11 @@ function buildTextbookMeta(course: Course, chapters: Chapter[]): TextbookMeta {
       : index === chapters.length - 1
         ? "conclusion" as const
         : undefined;
-    const topics = fixedRole ? [] : (chapter.contract?.requiredTopics ?? []).slice(0, 7);
+    // Section titles come straight from requiredTopics — strip year/label
+    // noise deterministically so "迈向耦合系统（2024）" never reaches print.
+    const topics = fixedRole
+      ? []
+      : (chapter.contract?.requiredTopics ?? []).slice(0, 7).map(stripYearTagFromTitle);
     return {
       id: chapter.id,
       title: chapter.title,
@@ -930,7 +935,7 @@ function buildTextbookMeta(course: Course, chapters: Chapter[]): TextbookMeta {
 
   return {
     title: textbookTitle(course.topic),
-    subtitle: course.goal,
+    subtitle: course.courseBible.goalStatement ?? course.goal,
     language: "zh-CN",
     outlineStatus: "ready",
     outline: {

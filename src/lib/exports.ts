@@ -260,7 +260,9 @@ ${chapters}
 async function toTextbookTex(course: Course, options: TexOptions = {}) {
   const meta = course.textbookMeta;
   const title = meta?.title || course.topic;
-  const subtitle = meta?.subtitle || course.goal;
+  // The polished goal statement is the cover/preface face of the book — raw
+  // user phrasing (口语、错字) must never reach print.
+  const subtitle = course.courseBible.goalStatement || meta?.subtitle || course.goal;
   const createdDate = formatCourseDate(course.createdAt);
   const map = meta?.textbookMap;
   const chapters = course.chapters.map(async (chapter) => [
@@ -407,6 +409,8 @@ function prefaceTex(course: Course, title: string, createdDate: string) {
   const outcomeItems = outcomes.map((item) => `\\item ${escapeMarkdownText(item)}`).join("\n");
   const prerequisiteItems = prerequisites.map((item) => `\\item ${escapeMarkdownText(item)}`).join("\n");
   const audience = bible.targetLearner || course.profile || "希望系统学习该主题的读者";
+  // The preface quotes the polished goal statement, not the raw user input.
+  const goalText = bible.goalStatement || course.goal;
 
   return `\\chapter*{前言}
 \\markboth{前言}{前言}
@@ -416,7 +420,7 @@ ${escapeMarkdownText(title)} 是一本由 LearnByAI 生成并排版的个性化�
 \\medskip
 \\noindent\\textbf{读者对象。} ${escapeMarkdownText(audience)}
 
-${course.goal ? `\\medskip\n\\noindent\\textbf{学习目标。} ${escapeMarkdownText(course.goal)}` : ""}
+${goalText ? `\\medskip\n\\noindent\\textbf{学习目标。} ${escapeMarkdownText(goalText)}` : ""}
 
 ${outcomeItems ? `\\medskip\n\\noindent\\textbf{完成本教材后，读者应能：}\n\\begin{itemize}\n${outcomeItems}\n\\end{itemize}` : ""}
 

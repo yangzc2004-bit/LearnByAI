@@ -555,6 +555,61 @@ test("toTex emits textbook front matter, map page, and chapter-level counters", 
   assert.ok(tex.includes("\\item[$G_t$] 时刻 \\(t\\) 的回报。"), tex);
 });
 
+test("toTex uses the polished goalStatement on the cover and preface, not raw input", async () => {
+  const course = {
+    id: "course-goal-statement",
+    contentMode: "textbook",
+    topic: "理论生态学",
+    // Raw user input with colloquial phrasing and a typo — must never print.
+    goal: "把生态系统里不同角色当成做成agent，能与ai 相结合",
+    background: "",
+    styles: [],
+    learningMode: "standard",
+    chapterCount: 2,
+    difficulty: "intermediate",
+    profile: "读者画像",
+    createdAt: "2026-07-10T00:00:00.000Z",
+    courseBible: {
+      targetLearner: "生态学研究生",
+      finalOutcomes: ["能建立耦合系统模型"],
+      teachingStyle: "教材式",
+      prerequisites: [],
+      globalNarrative: "递进",
+      goalStatement: "以智能体视角系统建立生态系统耦合建模的理论框架，并掌握与 AI 方法结合的建模实践。",
+      terminology: [],
+      chapterDependencies: [],
+    },
+    textbookMeta: {
+      title: "理论生态学",
+      subtitle: "旧的副标题",
+      language: "zh-CN",
+      outlineStatus: "confirmed",
+    },
+    chapters: [
+      {
+        id: "ch-1",
+        title: "引言",
+        description: "背景。",
+        time: { readingMinutes: 10, exerciseMinutes: 0, practiceMinutes: 0, extensionMinutes: 0 },
+        content: "# 第一章 引言\n\n正文。",
+      },
+      {
+        id: "ch-2",
+        title: "总结与展望",
+        description: "回顾。",
+        time: { readingMinutes: 10, exerciseMinutes: 0, practiceMinutes: 0, extensionMinutes: 0 },
+        content: "# 第二章 总结与展望\n\n正文。",
+      },
+    ],
+  } as unknown as Course;
+
+  const tex = await toTex(course);
+  assert.ok(tex.includes("以智能体视角系统建立生态系统耦合建模的理论框架"), tex);
+  assert.ok(tex.includes("\\textbf{学习目标。}"), tex);
+  assert.ok(!tex.includes("当成做成agent"), tex);
+  assert.ok(!tex.includes("旧的副标题"), tex);
+});
+
 // ---- outline validation -----------------------------------------------------
 
 function outlineChapter(partial: Partial<TextbookOutlineChapter> & { title: string; order: number }): TextbookOutlineChapter {

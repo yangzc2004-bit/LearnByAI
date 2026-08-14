@@ -151,6 +151,10 @@ export type CourseBible = {
   teachingStyle: string;
   prerequisites: string[];
   globalNarrative: string;
+  /** Polished, typo-free goal statement derived from the raw user input — the
+   *  cover subtitle and the preface quote this instead of the raw goal string.
+   *  Optional (older courses fall back to course.goal). */
+  goalStatement?: string;
   /** Canonical math notation the whole course must reuse verbatim (symbol → meaning),
    *  so value functions / variables don't drift between independently-authored chapters.
    *  Optional: only produced for notation-heavy courses; older courses omit it. */
@@ -184,10 +188,21 @@ export type ChapterContract = {
   summaryForNext?: string;
 };
 
+export type DisciplineKind =
+  | "algorithm-engineering"
+  | "theory-math"
+  | "data-science"
+  | "humanities"
+  | "general";
+
 export type Course = {
   id: string;
   userId?: string;
   contentMode?: ContentMode;
+  /** Discipline profile chosen at planning time — drives the per-discipline
+   *  content-mix rules (runnable code for algorithm courses, full derivation
+   *  chains for theory courses) and their deterministic TQH checks. */
+  discipline?: DisciplineKind;
   topic: string;
   goal: string;
   background: string;

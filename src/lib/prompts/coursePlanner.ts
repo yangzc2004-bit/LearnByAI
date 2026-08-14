@@ -38,6 +38,9 @@ function teachingGuidance(input: CoursePlannerInput) {
 
 export type CourseSkeleton = {
   profile: string;
+  /** Discipline profile: algorithm-engineering | theory-math | data-science |
+   *  humanities | general. Drives the per-discipline content-mix rules. */
+  discipline?: string;
   chapters: {
     title: string;
     description: string;
@@ -98,6 +101,7 @@ ${formatInputMaterialSections(input)}
 只输出合法 JSON，不要输出 Markdown 或解释。结构必须为：
 {
   "profile": "学习路线说明",
+  "discipline": "学科类型",
   "chapters": [
     {
       "title": "章节标题",
@@ -119,6 +123,7 @@ ${formatInputMaterialSections(input)}
 硬性要求：
 - ${chapterCountRule(input.chapterCount)}
 - ${DEPTH_RULE}
+- discipline 取值只能是 "algorithm-engineering"（算法/工程：以可运行代码为核心交付物）、"theory-math"（理论/数学：以完整推导链条为核心）、"data-science"（数据科学：以数据处理流程与实验为核心）、"humanities"（人文社科）、"general"（通用）之一，按本课程的实际学科类型选择。
 - 最后一章必须是全书收尾「总结与展望」章，depth 取 "light"：回顾全书主线、串联各章脉络、指出前沿与后续学习方向，不引入新知识点；它占用目标章节数的最后一个名额，不额外增加章数。${textbookSkeletonRules(input)}
 - 学习方式约束：${LEARNING_MODE_STRUCTURE_RULE[input.learningMode]}
 - 规划深浅与口吻须符合上述难度基调。
@@ -128,7 +133,7 @@ ${formatInputMaterialSections(input)}
 - 每个重要分部边界必须有明确的“桥接句”：前一章收尾说明为什么旧理论不足，后一章开头说明新框架如何回应这个不足。
 - 从经典理论转向计算方法时，要先解释“为什么经典理论需要新工具”；从控制论转向智能体与 AI 方法时，要说明“可调控系统”的视角如何成为建模基础；从控制论转向 ABM 时，要说明 ABM 如何把局部规则涌现具体计算化。
 - 快速演进领域至少用 2 章覆盖联网摘要中的近期方法。
-- 近期方法的章节标题或 description 应写明代表性方法或论文年份。
+- 近期方法的代表性方法与论文年份只能写入 description 或后续正文契约，禁止进入章节标题（标题不得含年份、括号标签等杂质）。
 - 只采用联网摘要有来源支持的近期事实，不得虚构。
 - 第一个字符必须是 {，最后一个字符必须是 }。`;
 }
@@ -184,6 +189,7 @@ ${JSON.stringify(skeleton.chapters)}
     "teachingStyle": "统一写作风格",
     "prerequisites": ["前置知识"],
     "globalNarrative": "全书递进逻辑",
+    "goalStatement": "规范的教材学习目标陈述",
     "notation": [
       {"symbol":"LaTeX 记号，如 v_\\\\pi(s)","meaning":"含义，如 状态价值函数"}
     ],
@@ -198,6 +204,7 @@ ${JSON.stringify(skeleton.chapters)}
 }
 
 硬性要求：
+- goalStatement 是教材的“脸面”：把用户原始学习目标改写为 1 到 2 句规范、通顺、无口语、无错字的学习目标陈述（不超过 80 个中文字符），用于教材封面副标题与前言；不得改变用户目标的实质内容，不得加入用户没有提出的承诺。
 - chapterDependencies 的标题只能使用既定章节标题。
 - notation 给出全书统一数学记号表：为每个核心量固定唯一写法（如状态价值统一 v_\\pi(s)、动作价值 q_\\pi(s,a)、最优值 v_*、随机变量大写 S_t/A_t/R_t、取值小写 s/a/r），供各章逐字沿用；数学/记号密集课程必产，纯文科课程给空数组 []。
 - writingConventions 钉死全书写作约定：①每个概念只用一个中文译名（如统一「马尔可夫」不写「马尔科夫」，「Bellman/贝尔曼」二选一）；②小节标题统一编号方案（如「N.M」）；③固定结尾块标题为「本章小结／练习／拓展阅读」；④图表编号与题注策略。
@@ -219,7 +226,7 @@ export function buildCourseBibleCompactPrompt(input: CoursePlannerInput, skeleto
 ${formatInputMaterialSections(input, 4_000)}
 
 只输出合法 JSON，结构为：
-{"courseBible":{"targetLearner":"目标学习者","finalOutcomes":["最终能力"],"teachingStyle":"写作风格","prerequisites":["前置知识"],"globalNarrative":"递进逻辑","terminology":[{"term":"术语","definition":"定义","introducedIn":"章节标题"}],"chapterDependencies":[{"chapterTitle":"章节标题","dependsOn":["前置章节"],"introduces":["新概念"],"preparesFor":["后续章节"]}]}}
+{"courseBible":{"targetLearner":"目标学习者","finalOutcomes":["最终能力"],"teachingStyle":"写作风格","prerequisites":["前置知识"],"globalNarrative":"递进逻辑","goalStatement":"把用户原始目标改写为规范学习目标陈述（≤80 字）","terminology":[{"term":"术语","definition":"定义","introducedIn":"章节标题"}],"chapterDependencies":[{"chapterTitle":"章节标题","dependsOn":["前置章节"],"introduces":["新概念"],"preparesFor":["后续章节"]}]}}
 
 硬性要求：
 - 不要输出 chapterContracts。
@@ -283,7 +290,7 @@ ${JSON.stringify(chapter)}
 - ${input.contentMode === "textbook"
     ? "requiredTopics 是本章的小节大纲：4 到 7 项，每项是一个可独立成节的主题（如「策略迭代的收敛性」），按讲授顺序排列；其余数组最多 4 项。每个字符串不超过 70 个中文字符。"
     : "每个数组最多 4 项，每个字符串不超过 70 个中文字符。"}
-- 联网摘要中与本章相关的近期论文必须进入 requiredTopics，并带年份。
+- 联网摘要中与本章相关的近期论文必须进入 requiredTopics；年份信息写在主题描述文字里，requiredTopics 条目本身不得以「（2024）」等年份括号结尾。
 - 预印本、录用和正式发表状态不得混淆，不得虚构来源。
 - forbiddenEarlyTopics 只写后续章节才展开的主题。
 - 第一个字符必须是 {，最后一个字符必须是 }。`;

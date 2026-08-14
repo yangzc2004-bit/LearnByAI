@@ -17,17 +17,18 @@ import {
   buildCourseSkeletonCompactPrompt,
   buildCourseSkeletonPrompt,
 } from "../prompts/coursePlanner";
-import type { CourseBibleCore, CourseSkeleton } from "../prompts/coursePlanner";
+import type { CourseBibleCore, CoursePlannerInput, CourseSkeleton } from "../prompts/coursePlanner";
 import { buildFormatGuardPrompt, postRepairMarkdown, preRepairMarkdown } from "../prompts/formatGuard";
 import { runChapterQualityPipelineWithRepair } from "../quality/pipeline";
 import { safeErrorMessage } from "../safeError";
 import { assertChapterPositionRequirements } from "../courseRequirementConstraints";
-import { Chapter, ChapterContract, ChapterGenerateResponse, ContentMode, Course, CourseBible, CourseCreateResponse, CourseDifficulty, CourseInputMaterial, ExplanationStyle, GenerationJob, GenerationProfile, LearningMode, QualityIssue, QualityReport, RevisionMode, RevisionScope, Section } from "../types";
+import { Chapter, ChapterContract, ChapterGenerateResponse, ContentMode, Course, CourseBible, CourseCreateResponse, CourseDifficulty, CourseInputMaterial, DisciplineKind, ExplanationStyle, GenerationJob, GenerationProfile, LearningMode, QualityIssue, QualityReport, RevisionMode, RevisionScope, Section } from "../types";
 import { researchLatestCourseKnowledge } from "../webResearch";
 import { dispatchAgentText } from "./dispatcher";
 import { assertMockFallbackAllowed } from "./fallback";
 import { markdownToSections } from "./integrator";
 import { runChapterAuthorHarness } from "./chapterAuthorHarness";
+import { applySkeletonTitleReviews, buildSkeletonTitleReviewPrompt, parseSkeletonTitleReviews } from "../titleReview";
 
 export type CourseInput = {
   topic: string;
@@ -49,6 +50,7 @@ export type CourseInput = {
 
 export type CourseGeneration = {
   profile: string;
+  discipline?: string;
   courseBible: CourseBible;
   chapters: Omit<Chapter, "id" | "content" | "review" | "status">[];
 };
@@ -135,6 +137,7 @@ export async function generateCourse(input: CourseInput, options: { overrides?: 
       id: crypto.randomUUID(),
       ...input,
       profile: generated.profile,
+      discipline: normalizeDiscipline(generated.discipline),
       courseBible: generated.courseBible,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -484,7 +487,7 @@ async function reviewChapter(
 ) {
   // Always resolve format deterministically before scoring: format is a solved,
   // deterministic problem and must not depend on (or consume) the LLM repair loop.
-  const quality = runChapterQualityPipelineWithRepair(chapter, content, postRepairMarkdown);
+  const quality = runChapterQualityPipelineWithRepair(chapter, content, postRepairMarkdown, course);
   const report = quality.report;
   let lastReviewerText: string | undefined;
 
@@ -1415,6 +1418,11 @@ export async function planCourseOutline(
           options.onJobUpdate,
           (value) => assertCourseSkeleton(value, plannerInput),
         );
+
+        // Independent title-review pass BEFORE anything else references the
+        // titles (bible, dependencies, contracts all read skeleton.chapters).
+        skeleton = await reviewSkeletonTitles(skeleton, plannerInput, jobId, options);
+
         await saveCheckpoint({ skeleton });
       }
 
@@ -1538,6 +1546,93 @@ function dispatchCoursePlannerStage(
     mock: () => "{}",
     onJobUpdate,
   });
+}
+
+const DISCIPLINE_KINDS = [
+  "algorithm-engineering",
+  "theory-math",
+  "data-science",
+  "humanities",
+  "general",
+] as const;
+
+/** Tolerantly coerce a planner-provided discipline label into a known kind. */
+export function normalizeDiscipline(value: string | undefined): DisciplineKind {
+  const trimmed = value?.trim().toLowerCase();
+  return (DISCIPLINE_KINDS as readonly string[]).includes(trimmed ?? "")
+    ? (trimmed as DisciplineKind)
+    : "general";
+}
+
+/**
+ * Independent title-review pass: one REVIEWER call that audits every chapter
+ * title (content match, well-formed sentence, no year/label noise) and
+ * applies safe revisions before the bible/contracts inherit the titles.
+ * Purely an enhancement — provider failure or invalid revisions keep the
+ * original titles and never block planning.
+ */
+async function reviewSkeletonTitles(
+  skeleton: CourseSkeleton,
+  plannerInput: CoursePlannerInput,
+  jobId: string,
+  options: { overrides?: ModelOverrides; onJobUpdate?: (job: GenerationJob) => Promise<void> | void },
+) {
+  const reviewJob = appendJobEvent(jobId, {
+    agent: "REVIEWER",
+    status: "running",
+    message: "正在审校章节标题（内容匹配、无病句、无年份杂质）。",
+  }, { preserveJobStatus: true });
+  if (reviewJob) await options.onJobUpdate?.(reviewJob);
+
+  try {
+    const raw = await dispatchAgentText({
+      agent: "REVIEWER",
+      jobId,
+      prompt: buildSkeletonTitleReviewPrompt(plannerInput, skeleton),
+      temperature: 0.1,
+      maxTokens: 2048,
+      timeoutMs: COURSE_PLANNER_STAGE_TIMEOUT_MS,
+      maxAttempts: 1,
+      responseFormat: "json_object",
+      overrides: options.overrides,
+      mock: () => JSON.stringify({ titles: [] }),
+    });
+    const reviews = parseSkeletonTitleReviews(raw);
+    const applied = applySkeletonTitleReviews(skeleton, reviews);
+
+    // Reviewed titles must still satisfy chapter-count/unique/user-requirement
+    // constraints; on any violation keep the original titles.
+    try {
+      assertCourseSkeleton(applied.skeleton, plannerInput);
+    } catch (error) {
+      const revertedJob = appendJobEvent(jobId, {
+        agent: "REVIEWER",
+        status: "running",
+        message: `标题审校结果未通过约束校验，保留原标题：${safeErrorMessage(error, "validation failed")}`,
+      }, { preserveJobStatus: true });
+      if (revertedJob) await options.onJobUpdate?.(revertedJob);
+      return skeleton;
+    }
+
+    if (applied.changed > 0) {
+      const doneJob = appendJobEvent(jobId, {
+        agent: "REVIEWER",
+        status: "running",
+        message: `标题审校完成：修订 ${applied.changed} 个标题${applied.rejected.length ? `，跳过 ${applied.rejected.length} 个无效修订` : ""}。`,
+      }, { preserveJobStatus: true });
+      if (doneJob) await options.onJobUpdate?.(doneJob);
+      return applied.skeleton;
+    }
+    return skeleton;
+  } catch (error) {
+    const fallbackJob = appendJobEvent(jobId, {
+      agent: "REVIEWER",
+      status: "running",
+      message: `标题审校暂时不可用，保留原章节标题：${safeErrorMessage(error, "REVIEWER failed")}`,
+    }, { preserveJobStatus: true });
+    if (fallbackJob) await options.onJobUpdate?.(fallbackJob);
+    return skeleton;
+  }
 }
 
 function coursePlannerBudgets(input: CourseInput) {
@@ -1664,6 +1759,7 @@ function mergeCoursePlanningStages(skeleton: CourseSkeleton, courseBible: Course
 
   return {
     profile: skeleton.profile,
+    discipline: skeleton.discipline,
     courseBible: {
       ...courseBible,
       chapterContracts: chapters.map((chapter) => chapter.contract),
