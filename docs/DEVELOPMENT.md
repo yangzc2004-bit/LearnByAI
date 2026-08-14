@@ -243,6 +243,29 @@ Files under `src/lib/quality` provide:
 - A chapter quality pipeline that returns score, status, and issues.
 - A deterministic self-repair pass for repairable format failures before failed content is exposed as ready.
 
+### Companion guide (AI 伴学指南)
+
+The companion guide is an interactive self-study layer over a chapter, generated on demand by
+`runCompanionGuideGenerationJob` (`src/lib/generationRunner.ts`) and stored as
+`chapter.companionGuide` — never part of the chapter body or its PDF/TeX export. It works for
+both content modes (`contentMode: "lecture" | "textbook"`).
+
+- Types: `CompanionGuide` / `CompanionBlock` / `CompanionProgress` (`src/lib/types.ts`); the legacy
+  `ChapterLecture` / `LectureBlock` / `LectureProgress` names are deprecated aliases kept for one
+  release cycle.
+- Prompts: `src/lib/prompts/companionGuide.ts` (伴学引导师 role; teach-block anchors read the real
+  `##` headings of the chapter body instead of fixed N.M numbering).
+- API: `POST /api/chapters/[id]/companion` plus the two-level `companion-progress` endpoints; the
+  old `/lecture` routes forward to them with a deprecation notice for one release cycle.
+- Persistence: `chapter_companion_progress` is the canonical progress table (backfilled from
+  `chapter_lecture_progress`, kept for one release cycle); reads prefer the new table and fall back
+  to the old one, and writes use an atomic upsert keyed by (user_id, chapter_id).
+- Safety: guide writes go through `updateChapterCompanionIfContentHashMatches` (one course lock
+  around read + fingerprint verify + write); `updateServerChapter` clears the guide when the body
+  changes; the read funnel `normalizeCourseRead` hides guides whose `sourceContentHash` no longer
+  matches. Quiz progress is validated by `src/lib/companionProgressValidation.ts` (score ≤ total,
+  total equals the current quiz count).
+
 ### Persistence
 
 `src/lib/serverStore.ts` is the server persistence adapter:
