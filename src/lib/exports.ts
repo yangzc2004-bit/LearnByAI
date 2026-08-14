@@ -8,6 +8,7 @@ import { createFigureMarkdownRe } from "./figures";
 import { ILLUSTRATION_URL_PREFIX, readIllustrationImage } from "./illustration";
 import { createSupabaseServiceClient } from "./supabase/server";
 import { rasterizeSvg, renderCoursePdf } from "./pdf";
+import { formatQaWarnings, qaChapterMarkdownForExport, qaGeneratedTex } from "./quality/exportQa";
 import { safeErrorMessage } from "./safeError";
 import { compileLatexProject, TeXCompileError } from "./texCompiler";
 import { Course, ExportJob } from "./types";
@@ -26,7 +27,7 @@ export async function createCourseExport(
   const chapter = options.chapterId
     ? course.chapters.find((item) => item.id === options.chapterId)
     : undefined;
-  const content = await buildExportContent(course, format, exportId, chapter);
+  const built = await buildExportContent(course, format, exportId, chapter);
   const baseName = chapter
     ? `${sanitize(course.topic)}-${sanitize(chapter.title)}`
     : sanitize(course.topic);
@@ -40,11 +41,12 @@ export async function createCourseExport(
     storagePath: `${pathSegment(userId ?? "local-beta-user")}/${pathSegment(course.id)}/${exportId}.${format}`,
     contentType: format === "tex" ? "application/x-tex" : "application/pdf",
     encoding: format === "tex" ? "utf8" : "base64",
+    ...(built.qaWarnings.length ? { qaWarnings: built.qaWarnings } : {}),
     createdAt: now,
     updatedAt: now,
   };
 
-  await writeExportContent(job, content);
+  await writeExportContent(job, built.content);
   exportJobs.set(job.id, job);
   return job;
 }
@@ -58,22 +60,52 @@ async function buildExportContent(
   format: ExportJob["format"],
   exportId: string,
   chapter: Course["chapters"][number] | undefined,
-): Promise<string | Buffer> {
-  if (format === "tex") return toTex(course);
+): Promise<{ content: string | Buffer; qaWarnings: string[] }> {
+  if (format === "tex") {
+    const tex = await toTex(course);
+    const qa = qaGeneratedTex(tex);
+    if (qa.length) {
+      console.warn(`[exports] TeX QA found ${qa.length} issue(s) for course ${course.id}:`, qa.map((item) => item.message));
+    }
+    return { content: tex, qaWarnings: formatQaWarnings(qa) };
+  }
 
   if (course.contentMode === "textbook" && !chapter) {
     try {
-      return await renderTextbookPdf(course, exportId);
+      const result = await renderTextbookPdf(course, exportId);
+      return { content: result.pdf, qaWarnings: result.qaWarnings };
     } catch (error) {
       // The designed TeX pipeline failed (e.g. a LaTeX error in some chapter
       // content). Fall back to the HTML print render so a whole-book export
       // never hard-fails — the user still gets a complete PDF.
       console.warn(`[exports] textbook TeX compile failed, falling back to HTML render: ${safeErrorMessage(error, "TeX compile error")}`);
-      return await renderCoursePdf(course.id, {});
+      const markdownQa = qaBookMarkdownForExport(course);
+      return {
+        content: await renderCoursePdf(course.id, {}),
+        qaWarnings: [
+          `TeX 编译失败，已回退到 HTML 打印渲染：${safeErrorMessage(error, "TeX compile error")}`,
+          ...formatQaWarnings(markdownQa),
+        ],
+      };
     }
   }
 
-  return renderCoursePdf(course.id, { chapterId: chapter?.id });
+  return {
+    content: await renderCoursePdf(course.id, { chapterId: chapter?.id }),
+    qaWarnings: formatQaWarnings(qaBookMarkdownForExport(course, chapter)),
+  };
+}
+
+/** Run the markdown-level export QA over every exported chapter (HTML path safety net). */
+function qaBookMarkdownForExport(course: Course, onlyChapter?: Course["chapters"][number]) {
+  const chapters = onlyChapter ? [onlyChapter] : course.chapters;
+  const issues = chapters.flatMap((item) =>
+    qaChapterMarkdownForExport(item.content ?? item.sections?.map((section) => section.content).join("\n\n") ?? ""),
+  );
+  if (issues.length) {
+    console.warn(`[exports] markdown export QA found ${issues.length} issue(s) for course ${course.id}:`, issues.map((item) => item.message));
+  }
+  return issues;
 }
 
 export async function readExportContent(job: ExportJob) {
@@ -162,9 +194,17 @@ async function renderTextbookPdf(course: Course, exportId: string) {
   const mainTexPath = join(projectDir, "main.tex");
   await writeFile(mainTexPath, tex, "utf8");
 
+  // Post-conversion QA: catch residue classes (literal $, backticks, escaped
+  // heading hashes, math leaking into text mode, orphan sub-levels) before
+  // compilation, and surface them on the export job for the user.
+  const qa = qaGeneratedTex(tex);
+  if (qa.length) {
+    console.warn(`[exports] generated TeX QA found ${qa.length} issue(s) for course ${course.id}:`, qa.map((item) => `${item.check}: ${item.message}`));
+  }
+
   try {
     const result = await compileLatexProject(mainTexPath);
-    return result.pdf;
+    return { pdf: result.pdf, qaWarnings: formatQaWarnings(qa) };
   } catch (error) {
     if (error instanceof TeXCompileError) {
       throw new Error(
@@ -172,6 +212,7 @@ async function renderTextbookPdf(course: Course, exportId: string) {
           error.message,
           `TeX project kept at: ${error.projectDir ?? projectDir}`,
           error.log ? lastInterestingLogLines(error.log) : "",
+          qa.length ? `Export QA issues before compile (${qa.length}):\n${formatQaWarnings(qa).join("\n")}` : "",
         ].filter(Boolean).join("\n"),
       );
     }
@@ -519,6 +560,10 @@ export async function markdownToTex(markdown: string, options: TexOptions = {}) 
   const out: string[] = [];
   let index = 0;
   let fixedListKind: "exercise" | "reading" | undefined;
+  // Per-chapter state: which TeX heading levels have already been emitted, so
+  // orphan markdown levels can be compacted upward instead of leaving a
+  // numbering gap (the "2.4.0.1" defect). Fresh per invocation = per chapter.
+  const emittedHeadingLevels = new Set<number>();
 
   while (index < lines.length) {
     const line = lines[index] ?? "";
@@ -602,32 +647,13 @@ export async function markdownToTex(markdown: string, options: TexOptions = {}) 
     // Headings. The first line of every chapter is the mandated "# 第 N 章 …"
     // which duplicates the \chapter{} already emitted — drop it. TeX counters
     // number sections, so strip any leading "N.M" the writer put in the text.
-    const h3 = line.match(/^###\s+(.+)$/u);
-    if (h3) {
-      const heading = stripHeadingNumber(h3[1] ?? "");
-      fixedListKind = fixedListKindForHeading(heading);
-      const split = splitOversizedHeading(heading);
-      if (split) {
-        out.push(`\\subsubsection{${escapeMarkdownText(split.title)}}`, "", escapeMarkdownText(split.body));
-      } else {
-        out.push(`\\subsubsection{${escapeMarkdownText(heading)}}`);
-      }
-      index += 1;
-      continue;
-    }
-    const h2 = line.match(/^##\s+(.+)$/u);
-    if (h2) {
-      const heading = stripHeadingNumber(h2[1] ?? "");
-      fixedListKind = fixedListKindForHeading(heading);
-      const split = splitOversizedHeading(heading);
-      if (split) {
-        out.push(`\\section{${escapeMarkdownText(split.title)}}`, "", escapeMarkdownText(split.body));
-      } else {
-        out.push(`\\section{${escapeMarkdownText(heading)}}`);
-      }
-      index += 1;
-      continue;
-    }
+    //
+    // Heading-level mapping ("2.4.0.1" fix): markdown `###` used to map straight
+    // to \subsubsection, skipping \subsection, so TeX numbered every such
+    // heading "chapter.section.0.K". Each level now maps to its natural TeX
+    // level, and orphan levels are compacted upward — an `###` before any `##`
+    // becomes a \section, a `####` without a preceding `###` becomes a
+    // \subsection — so the counters can never print a ".0." gap.
     const h1 = line.match(/^#\s+(.+)$/u);
     if (h1) {
       const text = h1[1] ?? "";
@@ -635,6 +661,18 @@ export async function markdownToTex(markdown: string, options: TexOptions = {}) 
       if (!/^第\s*[0-9一二三四五六七八九十百]+\s*章/u.test(text.trim())) {
         out.push(`\\section*{${escapeMarkdownText(stripHeadingNumber(text))}}`);
       }
+      index += 1;
+      continue;
+    }
+    const headingLine = line.match(/^(#{2,5})\s+(.+)$/u);
+    if (headingLine) {
+      const markdownLevel = headingLine[1]?.length ?? 2;
+      const heading = stripHeadingNumber(headingLine[2] ?? "");
+      fixedListKind = fixedListKindForHeading(heading);
+      const split = splitOversizedHeading(heading);
+      const command = texHeadingCommand(markdownLevel, emittedHeadingLevels);
+      out.push(`${command}{${escapeMarkdownText(split ? split.title : heading)}}`);
+      if (split) out.push("", escapeMarkdownText(split.body));
       index += 1;
       continue;
     }
@@ -809,6 +847,30 @@ async function fixedSectionListToTex(
 
 function stripHeadingNumber(text: string) {
   return text.trim().replace(/^\d+(?:\.\d+)*\s*/u, "");
+}
+
+/**
+ * Map a Markdown heading level to its TeX sectioning command, compacting
+ * orphan levels upward so TeX counters never skip a level (skips print as
+ * "2.4.0.1"). Level 5 maps to \paragraph, which is unnumbered at
+ * secnumdepth=3, so it can stay put without creating a numbering gap.
+ */
+function texHeadingCommand(markdownLevel: number, emitted: Set<number>) {
+  if (markdownLevel === 2) {
+    emitted.add(2);
+    return "\\section";
+  }
+  if (markdownLevel === 3) {
+    const effective = emitted.has(2) ? 3 : 2;
+    emitted.add(effective);
+    return effective === 3 ? "\\subsection" : "\\section";
+  }
+  if (markdownLevel === 4) {
+    const effective = emitted.has(3) ? 4 : emitted.has(2) ? 3 : 2;
+    emitted.add(effective);
+    return effective === 4 ? "\\subsubsection" : effective === 3 ? "\\subsection" : "\\section";
+  }
+  return "\\paragraph";
 }
 
 /**
@@ -1152,9 +1214,13 @@ function escapeTex(value: string) {
 
 function escapeMarkdownText(value: string) {
   const math: string[] = [];
+  // Writer output sometimes ships literal \$ escapes (a format-guard artifact,
+  // e.g. \$2.1, 2.1, 1.8, 0.5\$ in exercises). Unescape them first so the
+  // pair is re-protected as math — otherwise the delimiters print on the page.
+  const unescaped = value.replace(/\\\$/gu, "$");
   // \\\([\s\S]*?\\\) (non-greedy to the literal "\)") also matches inline math
   // that itself contains parens, e.g. \(f(x)\).
-  const protectedText = value.replace(/(\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))/gu, (match) => {
+  const protectedText = unescaped.replace(/(\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))/gu, (match) => {
     math.push(match);
     return `@@MATH${math.length - 1}@@`;
   });

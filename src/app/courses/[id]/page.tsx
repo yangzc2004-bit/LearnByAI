@@ -14,7 +14,7 @@ import {
   stageForEvent,
 } from "@/components/generation-studio/helpers";
 import { effectiveChapterStatus, hasChapterBody, isChapterReadable } from "@/lib/chapterReadiness";
-import { Target, Lightbulb, GraduationCap, ArrowLeft, FileText, ChevronRight, Clock, Download, Activity, BookMarked, Map } from "lucide-react";
+import { Target, Lightbulb, GraduationCap, ArrowLeft, FileText, ChevronRight, Clock, Download, Activity, BookMarked, Map, ScanSearch } from "lucide-react";
 import { apiFetch, subscribeToSse } from "@/lib/clientApi";
 import { publicSafeErrorMessage } from "@/lib/publicSafeError";
 
@@ -84,6 +84,14 @@ function chapterTone(chapter: Course["chapters"][number], currentJobStatus?: Job
   return "border-border bg-background text-muted-foreground";
 }
 
+type TerminologyAuditReport = {
+  status: "ok" | "skipped" | "failed";
+  conflicts: { key: string; variants: string[]; occurrences: number; chapters: number[] }[];
+  replacements: { from: string; to: string }[];
+  appliedToChapters: { chapterId: string; title: string; replacements: number }[];
+  error?: string;
+};
+
 export default function CourseOverviewPage() {
   const { id } = useParams<{ id: string }>();
   const [course, setCourse] = useState<Course>();
@@ -99,6 +107,9 @@ export default function CourseOverviewPage() {
   const [studioExpanded, setStudioExpanded] = useState(false);
   const [retryingMap, setRetryingMap] = useState(false);
   const [mapRetryError, setMapRetryError] = useState("");
+  const [auditing, setAuditing] = useState(false);
+  const [auditError, setAuditError] = useState("");
+  const [auditResult, setAuditResult] = useState<TerminologyAuditReport | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -274,6 +285,26 @@ export default function CourseOverviewPage() {
     }
   }
 
+  async function runTerminologyAudit() {
+    if (!course) return;
+    setAuditing(true);
+    setAuditError("");
+    setAuditResult(null);
+    try {
+      const response = await apiFetch(`/api/courses/${course.id}/terminology-audit`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      const data = (await response.json().catch(() => ({}))) as { report?: TerminologyAuditReport; error?: string };
+      if (!response.ok || !data.report) throw new Error(data.error ?? "术语一致性审计失败。");
+      setAuditResult(data.report);
+    } catch (error) {
+      setAuditError(publicSafeErrorMessage(error, "术语一致性审计失败。"));
+    } finally {
+      setAuditing(false);
+    }
+  }
+
   const hasLoadedCourse = Boolean(course);
   const coursePlanningStatus = course?.generationJobId ? jobStatus[course.generationJobId] : undefined;
   const isCoursePlanning =
@@ -359,8 +390,45 @@ export default function CourseOverviewPage() {
             >
               <Download size={14} /> {exporting === "tex" ? "导出中" : "导出 TeX"}
             </button>
+            <button
+              onClick={() => void runTerminologyAudit()}
+              disabled={auditing}
+              title="扫描全书术语写法冲突（如「马尔科夫/马尔可夫」）并自动统一"
+              className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+            >
+              <ScanSearch size={14} /> {auditing ? "审计中（需数分钟）" : "术语一致性审计"}
+            </button>
           </div>
           {exportError && <p className="mt-4 text-sm text-destructive">{exportError}</p>}
+          {auditError && <p className="mt-4 text-sm text-destructive">{auditError}</p>}
+          {auditResult && (
+            <div className="mt-4 space-y-1 rounded-md border border-border bg-background p-3 text-xs text-muted-foreground">
+              {auditResult.status === "skipped" && <p>章节不足两章，跳过审计。</p>}
+              {auditResult.status === "failed" && <p className="text-destructive">{auditResult.error ?? "审计失败。"}</p>}
+              {auditResult.status === "ok" && auditResult.conflicts.length === 0 && (
+                <p className="text-emerald-600 dark:text-emerald-400">未发现术语写法冲突，全书译名一致。</p>
+              )}
+              {auditResult.conflicts.length > 0 && (
+                <>
+                  <p className="font-medium text-foreground">发现 {auditResult.conflicts.length} 组术语写法冲突：</p>
+                  <ul className="list-disc space-y-0.5 pl-5">
+                    {auditResult.conflicts.map((conflict) => (
+                      <li key={conflict.key}>
+                        「{conflict.variants.join(" / ")}」——共 {conflict.occurrences} 处（第 {conflict.chapters.join("、")} 章）
+                      </li>
+                    ))}
+                  </ul>
+                  {auditResult.appliedToChapters.length > 0 ? (
+                    <p className="text-emerald-600 dark:text-emerald-400">
+                      已统一 {auditResult.replacements.length} 组写法，更新 {auditResult.appliedToChapters.length} 章正文。
+                    </p>
+                  ) : (
+                    <p>未执行替换（没有安全的替换对，或冲突写法未在正文中出现）。</p>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </div>
 
         {needsOutlineConfirmation && (

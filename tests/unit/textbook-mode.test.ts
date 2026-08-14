@@ -235,7 +235,45 @@ test("markdownToTex turns a bare language line into a code fence", async () => {
 test("markdownToTex strips writer numbering from section headings (TeX counters own numbers)", async () => {
   const tex = await markdownToTex("## 3.2 策略迭代\n\n### 3.2.1 收敛性");
   assert.ok(tex.includes("\\section{策略迭代}"), tex);
+  assert.ok(tex.includes("\\subsection{收敛性}"), tex);
+});
+
+test("markdownToTex maps ### to \\subsection (no more 2.4.0.1 numbering)", async () => {
+  const tex = await markdownToTex("## 2.4 价值函数\n\n### 2.4.1 状态价值\n\n正文。");
+  assert.ok(tex.includes("\\section{价值函数}"), tex);
+  assert.ok(tex.includes("\\subsection{状态价值}"), tex);
+  assert.ok(!tex.includes("\\subsubsection"), tex);
+});
+
+test("markdownToTex handles #### and ##### heading levels", async () => {
+  const tex = await markdownToTex("## 2.4 价值函数\n\n### 2.4.1 状态价值\n\n#### 2.4.1.1 收敛性\n\n##### 补充说明\n\n正文。");
+  assert.ok(tex.includes("\\section{价值函数}"), tex);
+  assert.ok(tex.includes("\\subsection{状态价值}"), tex);
   assert.ok(tex.includes("\\subsubsection{收敛性}"), tex);
+  assert.ok(tex.includes("\\paragraph{补充说明}"), tex);
+  assert.ok(!/####/u.test(tex), `no literal heading hashes: ${tex}`);
+});
+
+test("markdownToTex compacts orphan heading levels so counters never print .0.", async () => {
+  // ### with no ## before it becomes a section; #### with no ### becomes a subsection.
+  const tex = await markdownToTex("### 状态价值\n\n#### 收敛性\n\n正文。");
+  assert.ok(tex.includes("\\section{状态价值}"), tex);
+  assert.ok(tex.includes("\\subsection{收敛性}"), tex);
+  assert.ok(!tex.includes("\\subsubsection"), tex);
+});
+
+test("markdownToTex keeps a later ## section after #### subsubsections numbering-safe", async () => {
+  const tex = await markdownToTex("## A\n\n### B\n\n#### C\n\n## D\n\n正文。");
+  assert.ok(tex.includes("\\section{A}"), tex);
+  assert.ok(tex.includes("\\subsection{B}"), tex);
+  assert.ok(tex.includes("\\subsubsection{C}"), tex);
+  assert.ok(tex.includes("\\section{D}"), tex);
+});
+
+test("markdownToTex unescapes literal \\$ delimiter artifacts into math instead of printing $", async () => {
+  const tex = await markdownToTex("练习题中 \\$2.1, 2.1, 1.8, 0.5\\$ 应渲染为数学。");
+  assert.ok(tex.includes("$2.1, 2.1, 1.8, 0.5$"), tex);
+  assert.ok(!tex.includes("\\$2.1"), tex);
 });
 
 test("markdownToTex preserves math delimiters inside headings", async () => {

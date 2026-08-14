@@ -300,6 +300,8 @@ export type ExportJob = {
   contentType?: string;
   encoding?: "utf8" | "base64";
   error?: string;
+  /** Deterministic export QA findings (residue markers, heading-level gaps, math leaks). */
+  qaWarnings?: string[];
   createdAt: string;
   updatedAt: string;
 };
