@@ -222,6 +222,10 @@ async function toTextbookTex(course: Course, options: TexOptions = {}) {
 \\usepackage[hidelinks]{hyperref}
 \\makeatletter
 \\providecommand{\\cmrsideswitch}{}
+% CJK inside math-mode \\text{} must use \\mbox so xeCJK typesets it with the
+% CJK font instead of lmroman (which has no CJK glyphs → blank spots).
+\\let\\learnbyaiplaintext\\text
+\\renewcommand{\\text}[1]{\\ifmmode \\mathop{\\mbox{\\learnbyaiplaintext{#1}}}\\else \\learnbyaiplaintext{#1}\\fi}
 \\makeatother
 \\hypersetup{pdftitle={${escapeTex(title)}},pdfauthor={LearnByAI}}
 \\setcounter{tocdepth}{3}
@@ -1004,7 +1008,11 @@ function pathSegment(value: string) {
 }
 
 function escapeTex(value: string) {
-  return value.replace(/[&%$#_{}]/gu, (char) => `\\${char}`);
+  return value
+    .replace(/[&%$#_{}]/gu, (char) => `\\${char}`)
+    // Bare ^ outside math (e.g. author-written "u^*") is a hard LaTeX error in
+    // text mode — render it as a literal caret glyph instead.
+    .replace(/\^/gu, "\\textasciicircum{}");
 }
 
 function escapeMarkdownText(value: string) {
@@ -1032,7 +1040,10 @@ function protectBareLatexMath(value: string, math: string[]) {
   const command =
     String.raw`(?:alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|lambda|mu|nu|xi|pi|rho|sigma|tau|phi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega|le|leq|ge|geq|lt|gt|ne|neq|approx|sim|mid|times|cdot|div|pm|mp|infty|partial|nabla|sum|prod|int|lim|log|ln|exp|max|min|argmax|argmin|frac|dfrac|tfrac|sqrt|hat|bar|tilde|vec|mathcal|mathbb|mathbf|mathrm|operatorname|text|left|right|begin|end|quad|qquad)`;
   const token = new RegExp(
-    String.raw`(?:[0-9A-Za-z()[\]{}_^.,+\-*/=<>|'|]*\\${command}\b[0-9A-Za-z()[\]{}_^.,+\-*/=<>|'|\\]*)`,
+    // `(?![0-9A-Za-z])` instead of `\b`: a word boundary fails when the command
+    // is followed by `_`/`^` (both are word chars), so `\alpha_{ij}` used to
+    // leak into text mode and hard-fail the compile.
+    String.raw`(?:[0-9A-Za-z()[\]{}_^.,+\-*/=<>|'|]*\\${command}(?![0-9A-Za-z])[0-9A-Za-z()[\]{}_^.,+\-*/=<>|'|\\]*)`,
     "gu",
   );
 

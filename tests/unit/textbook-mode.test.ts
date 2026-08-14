@@ -190,6 +190,17 @@ test("markdownToTex drops empty consecutive $$ pairs", async () => {
   assert.ok(!/\\$\\$\\s*\\$\\$/u.test(tex), `empty pair should be dropped: ${tex}`);
 });
 
+test("markdownToTex wraps bare \\alpha_{ij} command sequences in math", async () => {
+  const tex = await markdownToTex("相互作用矩阵，A_{ij}=\\alpha_{ij}。");
+  assert.ok(tex.includes("$A_{ij}=\\alpha_{ij}$"), tex);
+});
+
+test("markdownToTex escapes bare ^ outside math", async () => {
+  const tex = await markdownToTex("平衡点变得简单——u^* = 1。");
+  assert.ok(tex.includes("\\textasciicircum{}"), tex);
+  assert.ok(!/\^/u.test(tex), `bare ^ must be escaped: ${tex}`);
+});
+
 test("markdownToTex strips writer numbering from section headings (TeX counters own numbers)", async () => {
   const tex = await markdownToTex("## 3.2 策略迭代\n\n### 3.2.1 收敛性");
   assert.ok(tex.includes("\\section{策略迭代}"), tex);
