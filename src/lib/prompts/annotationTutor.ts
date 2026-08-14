@@ -27,6 +27,11 @@ export type AnnotationTutorInput = {
     sectionContent?: string;
     chapterContent?: string;
     terminology?: { term: string; definition: string }[];
+    companion?: {
+      learningObjectives?: string[];
+      completed?: boolean;
+      latestQuiz?: { score: number; total: number } | null;
+    };
   };
 };
 
@@ -48,6 +53,15 @@ export function buildAnnotationTutorPrompt(input: AnnotationTutorInput) {
         ctx.chapterPurpose ? `章节任务：${ctx.chapterPurpose}` : "",
         ctx.chapterDescription ? `章节摘要：${ctx.chapterDescription}` : "",
         ctx.chapterSummary ? `本章内容概要：${ctx.chapterSummary}` : "",
+        ctx.companion?.learningObjectives?.length
+          ? `伴学目标（用户正在跟学的 AI 伴学指南目标，回答可围绕这些目标展开）：${ctx.companion.learningObjectives.join("；")}`
+          : "",
+        ctx.companion?.completed !== undefined
+          ? `伴学状态：本章伴学${ctx.companion.completed ? "已完成打卡" : "尚未完成"}`
+          : "",
+        ctx.companion?.latestQuiz
+          ? `最近一次伴学小测成绩：${ctx.companion.latestQuiz.score} / ${ctx.companion.latestQuiz.total}`
+          : "",
         ctx.bridgeToNext ? `本章为下一章铺垫（仅供衔接参考）：${ctx.bridgeToNext}` : "",
         ctx.sectionMap?.length
           ? `章节地图：\n${ctx.sectionMap.map((s) => `- ${s.label} ${s.title}：${s.purpose}`).join("\n")}`

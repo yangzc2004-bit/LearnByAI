@@ -2,35 +2,41 @@
 
 import { useMemo, useState } from "react";
 import { MarkdownContent } from "@/components/MarkdownContent";
-import { ChapterLecture, LectureProgress, Section } from "@/lib/types";
-import { BookOpen, CheckCircle2, ChevronRight, Lightbulb, RotateCcw, Target } from "lucide-react";
+import { CompanionGuide, CompanionProgress, Section } from "@/lib/types";
+import { BookOpen, Bot, CheckCircle2, ChevronRight, Lightbulb, RotateCcw, Target } from "lucide-react";
 
-type LectureViewProps = {
-  lecture: ChapterLecture;
+type CompanionViewProps = {
+  guide: CompanionGuide;
   chapterNumber: number;
   sections: Section[];
-  progress: LectureProgress | null | undefined;
+  progress: CompanionProgress | null | undefined;
   onSaveProgress: (score: number, total: number) => Promise<void>;
   onJumpToSection: (sectionId: string) => void;
+  sourceName?: string;
+  onAskFollowUp?: (question: string) => void;
 };
 
 /**
- * The lecture (讲义) reader: a continuous, document-style lecture-note view —
- * learning objectives, a flowing sequence of teach sections (intuition →
- * definition/concept box → worked example box, each anchored back to its
- * textbook section), a recap, a next-lecture preview, then inline self-checks
- * and a final quiz with scoring + check-in. Every text field renders through
- * the KaTeX pipeline so $...$ math is typeset, never shown as raw source.
+ * The companion guide (AI 伴学指南) reader: a continuous, document-style
+ * study view — learning objectives, a flowing sequence of teach sections
+ * (intuition → definition/concept box → worked example box, each anchored
+ * back to its source section), a recap, a next-lecture preview, then inline
+ * self-checks and a final quiz with scoring + check-in. Every teach block
+ * can open a follow-up question to the anchored tutor. Every text field
+ * renders through the KaTeX pipeline so $...$ math is typeset, never shown
+ * as raw source.
  */
-export function LectureView({
-  lecture,
+export function CompanionView({
+  guide,
   chapterNumber,
   sections,
   progress,
   onSaveProgress,
   onJumpToSection,
-}: LectureViewProps) {
-  const blocks = lecture.blocks ?? [];
+  sourceName = "原文",
+  onAskFollowUp,
+}: CompanionViewProps) {
+  const blocks = guide.blocks ?? [];
   const [quizAnswers, setQuizAnswers] = useState<Record<number, number>>({});
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -42,7 +48,7 @@ export function LectureView({
       : undefined,
   );
 
-  const quiz = lecture.finalQuiz ?? [];
+  const quiz = guide.finalQuiz ?? [];
   const score = quiz.reduce((sum, question, index) => (
     sum + (quizAnswers[index] === question.correctIndex ? 1 : 0)
   ), 0);
@@ -115,16 +121,25 @@ export function LectureView({
           )}
         </p>
       )}
+      {onAskFollowUp && (
+        <button
+          type="button"
+          onClick={() => onAskFollowUp("")}
+          className="mb-1 inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+        >
+          <Bot size={13} /> 向导师整章提问
+        </button>
+      )}
 
       {/* Learning objectives */}
-      {(lecture.learningObjectives?.length ?? 0) > 0 && (
+      {(guide.learningObjectives?.length ?? 0) > 0 && (
         <section className="my-6 rounded-lg border border-border bg-muted/20 px-5 py-4">
           <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
             <Target size={15} className="text-primary" />
             本讲目标
           </h2>
           <ul className="space-y-1.5">
-            {lecture.learningObjectives!.map((objective, index) => (
+            {guide.learningObjectives!.map((objective, index) => (
               <li key={index} className="flex items-start gap-2 text-sm leading-relaxed">
                 <span className="mt-0.5 font-mono text-xs text-primary">{index + 1}.</span>
                 <MarkdownContent content={objective} />
@@ -179,7 +194,16 @@ export function LectureView({
                     onClick={() => jumpToAnchor(block.anchorSection!)}
                     className="mt-4 inline-flex items-center gap-1 text-xs text-primary hover:underline"
                   >
-                    回教材第 {block.anchorSection} 节看原文 <ChevronRight size={13} />
+                    回{sourceName}第 {block.anchorSection} 节看原文 <ChevronRight size={13} />
+                  </button>
+                )}
+                {onAskFollowUp && (
+                  <button
+                    type="button"
+                    onClick={() => onAskFollowUp(`「${block.title}」这部分我想继续深入理解（原文：${block.anchorSection ?? "本章"}）`)}
+                    className="mt-4 ml-3 inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                  >
+                    继续追问 <Bot size={13} />
                   </button>
                 )}
               </section>
@@ -210,12 +234,12 @@ export function LectureView({
       </article>
 
       {/* Self-check — inline questions with foldable answers */}
-      {(lecture.selfCheck?.length ?? 0) > 0 && (
+      {(guide.selfCheck?.length ?? 0) > 0 && (
         <section className="mt-8 border-t border-border pt-6">
           <h2 className="mb-3 text-base font-semibold text-foreground">随堂自测</h2>
           <p className="mb-3 text-xs text-muted-foreground">先自己想，再点开答案。</p>
           <div className="space-y-3">
-            {lecture.selfCheck!.map((item, index) => (
+            {guide.selfCheck!.map((item, index) => (
               <SelfCheckItem key={index} index={index} question={item.question} answer={item.answer} />
             ))}
           </div>

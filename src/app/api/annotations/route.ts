@@ -4,7 +4,7 @@ import { askTutor } from "@/lib/maol/client";
 import { parseModelOverridesFromHeaders } from "@/lib/modelOverrides";
 import { withQuotaConsumption } from "@/lib/quota";
 import { safeErrorMessage } from "@/lib/safeError";
-import { deleteServerAnnotation, getServerCourse, listServerAnnotations, saveServerAnnotation, saveServerGenerationJob } from "@/lib/serverStore";
+import { deleteServerAnnotation, getServerCourse, getServerLectureProgress, listServerAnnotations, saveServerAnnotation, saveServerGenerationJob } from "@/lib/serverStore";
 import { encodeSseEvent } from "@/lib/sse";
 import { resolveModelOverrides } from "@/lib/userModelConfig";
 import { stripCitationMarkers } from "@/lib/citations";
@@ -70,7 +70,7 @@ export async function POST(request: Request) {
         selectedText: input.selectedText,
         question: input.question,
         history: input.history ?? [],
-        context: buildTutorContext(course, chapter, anchor.annotation, input.question as string | undefined, input.selectedText as string | undefined),
+        context: await buildTutorContext(course, chapter, anchor.annotation, input.question as string | undefined, input.selectedText as string | undefined, request),
         overrides,
         onJobUpdate: async (updatedJob) => {
           await saveServerGenerationJob(updatedJob, request);
@@ -141,7 +141,7 @@ async function handleStreamingPost(params: {
             selectedText: input.selectedText as string,
             question: input.question as string,
             history: (input.history as { role: "user" | "assistant"; content: string }[]) ?? [],
-            context: buildTutorContext(course, chapter, anchor.annotation, input.question as string | undefined, input.selectedText as string | undefined),
+            context: await buildTutorContext(course, chapter, anchor.annotation, input.question as string | undefined, input.selectedText as string | undefined, request),
             overrides,
             onChunk: (chunk) => {
               hasChunks = true;
@@ -281,12 +281,13 @@ function orderedSections(chapter: Chapter | undefined): Section[] {
  * `summaryForNext` is now surfaced only as `bridgeToNext`; `chapterSummary` is
  * derived from the chapter itself, never from the next-chapter handoff note.
  */
-function buildTutorContext(
+async function buildTutorContext(
   course: Course | undefined,
   chapter: Chapter | undefined,
   annotation: Annotation | undefined,
   question: string | undefined,
   selectedText: string | undefined,
+  request?: Request,
 ) {
   if (!course) return undefined;
 
@@ -299,6 +300,10 @@ function buildTutorContext(
   const anchoredSection = annotation?.sectionId
     ? sections.find((section) => section.id === annotation.sectionId)
     : undefined;
+  // 伴学上下文（AI 伴学指南计划 P1）：让导师知道用户当前跟学的伴学目标、
+  // 完成状态与最近小测结果，回答可以围绕这些目标展开。
+  const progress = chapter && request ? await getServerLectureProgress(chapter.id, request) : undefined;
+  const companionGuide = chapter?.companionGuide;
 
   return {
     goal: course.goal,
@@ -319,6 +324,15 @@ function buildTutorContext(
       ? truncateChars(chapterContentText(chapter, sections), 30000)
       : undefined,
     terminology: selectRelevantTerminology(course.courseBible?.terminology, question ?? "", selectedText ?? ""),
+    companion: companionGuide
+      ? {
+          learningObjectives: companionGuide.learningObjectives?.slice(0, 4),
+          completed: progress?.completed,
+          latestQuiz: progress?.quizScore !== undefined && progress?.quizTotal !== undefined
+            ? { score: progress.quizScore, total: progress.quizTotal }
+            : null,
+        }
+      : undefined,
   };
 }
 

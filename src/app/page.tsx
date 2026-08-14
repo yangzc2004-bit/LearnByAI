@@ -123,9 +123,9 @@ function CapabilitiesSection() {
     },
     {
       icon: MessageSquare,
-      title: "锚定式 AI 答疑",
+      title: "AI 伴学",
       description:
-        "阅读教材时选中任意文字或双击段落，即可向 AI 导师提问。AI 会结合上下文给出精准解释，支持多轮对话深入探讨。",
+        "电子讲义与电子教材都内置 AI 伴学：阅读时选中任意文字或双击段落，即可向 AI 导师提问，AI 会结合上下文给出精准解释，支持多轮对话深入探讨；伴学指南里还能一键继续追问。",
       features: ["选中即问", "上下文感知", "多轮对话", "LaTeX 公式支持"],
     },
   ];

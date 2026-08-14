@@ -6,13 +6,13 @@ import { MouseEvent, useCallback, useEffect, useState } from "react";
 import { MarkdownContent } from "@/components/MarkdownContent";
 import { TutorPanel } from "@/components/reader/TutorPanel";
 import { RevisePanel } from "@/components/reader/RevisePanel";
-import { LectureView } from "@/components/reader/LectureView";
+import { CompanionView } from "@/components/reader/CompanionView";
 import { useTutor } from "@/lib/hooks/useTutor";
 import { useRevise } from "@/lib/hooks/useRevise";
 import { apiFetch, subscribeToSse } from "@/lib/clientApi";
 import { publicSafeErrorMessage } from "@/lib/publicSafeError";
 import { formatMinutes, totalMinutes } from "@/lib/time";
-import { AgentEvent, Chapter, ChapterGenerateResponse, ChapterLecture, Course, EntityStatus, ExerciseAnswer, GenerationJob, LectureProgress, Section } from "@/lib/types";
+import { AgentEvent, Chapter, ChapterGenerateResponse, CompanionGuide, Course, EntityStatus, ExerciseAnswer, GenerationJob, CompanionProgress, Section } from "@/lib/types";
 import { effectiveChapterStatus, hasChapterBody, isChapterAwaitingQuality, isChapterReadable } from "@/lib/chapterReadiness";
 import { stageForEvent } from "@/components/generation-studio/helpers";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -139,79 +139,86 @@ function ExerciseAnswersBlock({ answers }: { answers: ExerciseAnswer[] }) {
 }
 
 /**
- * Status wrapper for the lecture view: entry card (not generated yet),
- * generating spinner, failure card, or the interactive LectureView itself.
+ * Status wrapper for the companion-guide view: entry card (not generated
+ * yet), generating spinner, failure card, or the interactive CompanionView
+ * itself. Works for both content modes — the source text is the chapter body.
  */
-function LecturePanel({
-  lecture,
+function CompanionPanel({
+  guide,
   chapterNumber,
   sections,
   progress,
   requesting,
-  onRequestLecture,
+  onRequestCompanion,
   onSaveProgress,
   onJumpToSection,
+  sourceName,
+  onAskFollowUp,
 }: {
-  lecture?: ChapterLecture;
+  guide?: CompanionGuide;
   chapterNumber: number;
   sections: Section[];
-  progress: LectureProgress | null | undefined;
+  progress: CompanionProgress | null | undefined;
   requesting: boolean;
-  onRequestLecture: () => void;
+  onRequestCompanion: () => void;
   onSaveProgress: (score: number, total: number) => Promise<void>;
   onJumpToSection: (sectionId: string) => void;
+  sourceName: string;
+  onAskFollowUp: (question: string) => void;
 }) {
-  if (lecture?.status === "ready" && lecture.blocks) {
+  if (guide?.status === "ready" && guide.blocks) {
     return (
       <div>
         <div className="mb-2 flex justify-end">
           <button
             type="button"
-            onClick={onRequestLecture}
+            onClick={onRequestCompanion}
             disabled={requesting}
             className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
-            title="重新浓缩当前章节正文生成讲义（消耗一次讲义配额）"
+            title="重新生成伴学指南（消耗一次伴学指南配额）"
           >
-            {requesting ? "重新生成中…" : "重新生成讲义"}
+            {requesting ? "重新生成中…" : "重新生成伴学指南"}
           </button>
         </div>
-        <LectureView
-          lecture={lecture}
+        <CompanionView
+          guide={guide}
           chapterNumber={chapterNumber}
           sections={sections}
           progress={progress}
           onSaveProgress={onSaveProgress}
           onJumpToSection={onJumpToSection}
+          sourceName={sourceName}
+          onAskFollowUp={onAskFollowUp}
         />
       </div>
     );
   }
 
-  if (lecture?.status === "queued" || lecture?.status === "generating") {
+  if (guide?.status === "queued" || guide?.status === "generating") {
     return (
       <div className="rounded-lg border border-dashed border-border py-24 text-center">
         <Presentation size={32} className="mx-auto mb-4 animate-pulse text-muted-foreground/50" />
         <p className="font-mono text-sm text-muted-foreground">
-          {lecture.status === "queued" ? "讲义已排队，等待生成…" : "AI 正在生成讲义（通常约 1 分钟）…"}
+          {guide.status === "queued" ? "伴学指南已排队，等待生成…" : "AI 正在生成伴学指南（通常约 1 分钟）…"}
         </p>
         <p className="mt-2 text-xs text-muted-foreground/60">
-          讲义会把本章浓缩成 15~20 分钟的自学课：目标 → 分块讲解 → 随堂自测 → 章末小测。
+          伴学指南会把本章浓缩成 15~20 分钟的自学课：目标 → 分块讲解 → 随堂自测 → 章末小测。
         </p>
       </div>
     );
   }
 
-  if (lecture?.status === "failed") {
+  if (guide?.status === "failed") {
     return (
       <div className="rounded-lg border border-destructive/30 bg-destructive/5 py-12 text-center">
-        <p className="font-mono text-sm text-destructive">讲义生成失败{lecture.error ? `：${lecture.error}` : "。"}</p>
+        <p className="font-mono text-sm text-destructive">伴学指南生成失败{guide.error ? `：${guide.error}` : "。"}</p>
         <button
           type="button"
-          onClick={onRequestLecture}
+          onClick={onRequestCompanion}
           disabled={requesting}
-          className="mt-5 inline-flex items-center gap-1.5 rounded-md border border-destructive/30 bg-background px-4 py-2 text-xs font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"
+          className="mt-5 inline-flex items-center gap-1.5 rounded-md border border-destructive/30 bg-background px-4 py-2 text-xs font-medium text-destructive hover:bg-destructive/5 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          <Presentation size={13} /> {requesting ? "请求中…" : "重新生成讲义"}
+          <Presentation size={13} /> {requesting ? "请求中…" : "重新生成伴学指南"}
         </button>
       </div>
     );
@@ -220,19 +227,19 @@ function LecturePanel({
   return (
     <div className="rounded-lg border border-border bg-card p-8 text-center">
       <Presentation size={32} className="mx-auto mb-4 text-primary" />
-      <h2 className="mb-2 text-lg font-semibold text-foreground">用讲义快速学完这一章</h2>
+      <h2 className="mb-2 text-lg font-semibold text-foreground">用 AI 伴学快速学完这一章</h2>
       <p className="mx-auto mb-6 max-w-md text-sm leading-relaxed text-muted-foreground">
-        讲义把本章教材浓缩成 15~20 分钟的自学课：先看目标，分块讲解（直觉 → 概念 → 例子），随堂自测即时对答案，最后小测打分并打卡。没看懂的地方可以一键跳回教材原文。
+        伴学指南把本章{sourceName}浓缩成 15~20 分钟的自学课：先看目标，分块讲解（直觉 → 概念 → 例子），随堂自测即时对答案，最后小测打分并打卡。没看懂的地方可以一键跳回{sourceName}原文或直接向导师追问。
       </p>
       <button
         type="button"
-        onClick={onRequestLecture}
+        onClick={onRequestCompanion}
         disabled={requesting}
-        className="inline-flex items-center gap-2 rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background disabled:opacity-50"
+        className="inline-flex items-center gap-2 rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background disabled:cursor-not-allowed disabled:opacity-50"
       >
-        <Presentation size={15} /> {requesting ? "请求中…" : "生成讲义（约 1 分钟）"}
+        <Presentation size={15} /> {requesting ? "请求中…" : "生成伴学指南（约 1 分钟）"}
       </button>
-      <p className="mt-3 text-xs text-muted-foreground">生成一份讲义会消耗一次{"\u201c"}讲义生成{"\u201d"}配额。</p>
+      <p className="mt-3 text-xs text-muted-foreground">生成一份伴学指南会消耗一次{"\u201c"}伴学指南生成{"\u201d"}配额。</p>
     </div>
   );
 }
@@ -255,9 +262,10 @@ export default function ReaderPage() {
   const [panel, setPanel] = useState<Panel>(null);
   const [chooser, setChooser] = useState<{ text: string; sectionId?: string } | null>(null);
 
-  const [view, setView] = useState<"textbook" | "lecture">("textbook");
-  const [lectureProgress, setLectureProgress] = useState<LectureProgress | null | undefined>(undefined);
+  const [view, setView] = useState<"content" | "companion">("content");
+  const [companionProgress, setCompanionProgress] = useState<CompanionProgress | null | undefined>(undefined);
   const [requestingLecture, setRequestingLecture] = useState(false);
+  const [pendingTutorQuestion, setPendingTutorQuestion] = useState<string | null>(null);
 
   const [tocWidth, setTocWidth] = useState(() => loadPanelWidth("learnbyai-toc-width", 256));
   const [rightWidth, setRightWidth] = useState(() => loadPanelWidth("learnbyai-right-width", 400));
@@ -559,28 +567,27 @@ export default function ReaderPage() {
     }
   }, [applyCourseUpdate, chapter, course, requalitying]);
 
-  const loadLectureProgress = useCallback(() => {
-    apiFetch(`/api/chapters/${chapterId}/lecture-progress?courseId=${id}`)
+  const loadCompanionProgress = useCallback(() => {
+    apiFetch(`/api/chapters/${chapterId}/companion-progress?courseId=${id}`)
       .then((response) => (response.ok ? response.json() : undefined))
       .then((data) => {
         if (data && typeof data === "object" && "progress" in data) {
-          setLectureProgress((data.progress as LectureProgress | null) ?? null);
+          setCompanionProgress((data.progress as CompanionProgress | null) ?? null);
         }
       })
       .catch(() => undefined);
   }, [chapterId, id]);
 
   useEffect(() => {
-    if (!isTextbook) return;
-    setLectureProgress(undefined);
-    loadLectureProgress();
-  }, [chapterId, id, isTextbook, loadLectureProgress]);
+    setCompanionProgress(undefined);
+    loadCompanionProgress();
+  }, [chapterId, id, loadCompanionProgress]);
 
-  const requestLecture = useCallback(async (options: { retry?: boolean } = {}) => {
+  const requestCompanion = useCallback(async (options: { retry?: boolean } = {}) => {
     if (!course || !chapter || requestingLecture) return;
     setRequestingLecture(true);
     try {
-      const response = await apiFetch(`/api/chapters/${chapter.id}/lecture`, {
+      const response = await apiFetch(`/api/chapters/${chapter.id}/companion`, {
         method: "POST",
         body: JSON.stringify({ courseId: course.id, retry: options.retry === true }),
       });
@@ -592,41 +599,46 @@ export default function ReaderPage() {
         retryBlocked?: boolean;
         error?: string;
       };
-      if (!response.ok && !data.retryBlocked) throw new Error(data.error ?? "讲义生成请求失败");
+      if (!response.ok && !data.retryBlocked) throw new Error(data.error ?? "伴学指南生成请求失败");
       if (data.retryBlocked) {
         if (data.course) applyCourseUpdate(data.course);
-        toast.error(data.error ?? "当前章节已有讲义生成任务。");
+        toast.error(data.error ?? "当前章节已有伴学指南生成任务。");
         return;
       }
       if (data.course) applyCourseUpdate(data.course);
     } catch (error) {
-      toast.error(publicSafeErrorMessage(error, "讲义生成请求失败，请稍后重试。"));
+      toast.error(publicSafeErrorMessage(error, "伴学指南生成请求失败，请稍后重试。"));
     } finally {
       setRequestingLecture(false);
     }
   }, [applyCourseUpdate, chapter, course, requestingLecture]);
 
-  const saveLectureProgress = useCallback(async (score: number, total: number) => {
+  const saveCompanionProgress = useCallback(async (score: number, total: number) => {
     if (!course) return;
-    const response = await apiFetch(`/api/chapters/${chapterId}/lecture-progress`, {
+    const response = await apiFetch(`/api/chapters/${chapterId}/companion-progress`, {
       method: "POST",
       body: JSON.stringify({ courseId: course.id, completed: true, quizScore: score, quizTotal: total }),
     });
-    const data = (await response.json().catch(() => ({}))) as { progress?: LectureProgress; error?: string };
+    const data = (await response.json().catch(() => ({}))) as { progress?: CompanionProgress; error?: string };
     if (!response.ok) throw new Error(data.error ?? "学习进度保存失败");
-    if (data.progress) setLectureProgress(data.progress);
+    if (data.progress) setCompanionProgress(data.progress);
   }, [chapterId, course]);
 
+  const askCompanionFollowUp = useCallback((question: string) => {
+    setPendingTutorQuestion(question);
+    setPanel("tutor");
+  }, []);
+
   const jumpToTextbookSection = useCallback((sectionId: string) => {
-    setView("textbook");
+    setView("content");
     window.setTimeout(() => {
       document.querySelector(`#section-${sectionId}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 80);
   }, []);
 
   useEffect(() => {
-    if (view !== "lecture") return;
-    const lectureStatus = chapter?.lecture?.status;
+    if (view !== "companion") return;
+    const lectureStatus = chapter?.companionGuide?.status;
     if (lectureStatus !== "queued" && lectureStatus !== "generating") return;
 
     let cancelled = false;
@@ -643,7 +655,7 @@ export default function ReaderPage() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [applyCourseUpdate, chapter?.lecture?.status, id, view]);
+  }, [applyCourseUpdate, chapter?.companionGuide?.status, id, view]);
 
   useEffect(() => {
     let cancelled = false;
@@ -880,23 +892,23 @@ export default function ReaderPage() {
               <ArrowLeft size={16} />
             </button>
             <span className="font-mono text-xs font-medium text-muted-foreground hidden md:inline-block">{course.topic}</span>
-            {isTextbook && chapterReadable && (
+            {chapterReadable && (
               <div className="ml-2 flex items-center rounded-md border border-border bg-muted/40 p-0.5">
                 <button
-                  onClick={() => setView("textbook")}
+                  onClick={() => setView("content")}
                   className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors ${
-                    view === "textbook" ? "bg-background font-medium text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                    view === "content" ? "bg-background font-medium text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  <BookOpen size={13} /> 教材
+                  <BookOpen size={13} /> {isTextbook ? "教材" : "讲义"}
                 </button>
                 <button
-                  onClick={() => setView("lecture")}
+                  onClick={() => setView("companion")}
                   className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors ${
-                    view === "lecture" ? "bg-background font-medium text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                    view === "companion" ? "bg-background font-medium text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  <Presentation size={13} /> 讲义
+                  <Presentation size={13} /> AI伴学
                 </button>
               </div>
             )}
@@ -1005,16 +1017,18 @@ export default function ReaderPage() {
             <div className="mb-8 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">{generationError}</div>
           ) : null}
 
-          {view === "lecture" && chapterReadable ? (
-            <LecturePanel
-              lecture={chapter.lecture}
+          {view === "companion" && chapterReadable ? (
+            <CompanionPanel
+              guide={chapter.companionGuide}
               chapterNumber={currentIndex + 1}
               sections={sections}
-              progress={lectureProgress}
+              progress={companionProgress}
               requesting={requestingLecture}
-              onRequestLecture={() => void requestLecture({ retry: true })}
-              onSaveProgress={saveLectureProgress}
+              onRequestCompanion={() => void requestCompanion({ retry: true })}
+              onSaveProgress={saveCompanionProgress}
               onJumpToSection={jumpToTextbookSection}
+              sourceName={isTextbook ? "教材" : "讲义"}
+              onAskFollowUp={askCompanionFollowUp}
             />
           ) : loading ? (
             <div className="rounded-lg border border-dashed border-border py-24 text-center">
@@ -1123,7 +1137,8 @@ export default function ReaderPage() {
             tutor={tutor}
             courseId={id}
             chapterId={chapterId}
-            onClose={() => setPanel(null)}
+            initialQuestion={pendingTutorQuestion ?? undefined}
+            onClose={() => { setPanel(null); setPendingTutorQuestion(null); }}
           />
         )}
         {panel === "revise" && <RevisePanel revise={revise} onClose={() => setPanel(null)} />}
@@ -1135,7 +1150,7 @@ export default function ReaderPage() {
           <button
             onClick={() => setPanel("tutor")}
             className="flex h-12 w-12 items-center justify-center rounded-l-md border border-r-0 border-border bg-card text-muted-foreground shadow-lg transition-colors hover:text-primary"
-            title="导师问答"
+            title="AI伴学"
           >
             <Bot size={18} />
           </button>

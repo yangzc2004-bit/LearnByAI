@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { formatMinutes, totalMinutes } from "@/lib/time";
-import { AgentEvent, Course, EntityStatus, ExportJob, GenerationJob, JobStatus, LectureProgress } from "@/lib/types";
+import { AgentEvent, Course, EntityStatus, ExportJob, GenerationJob, JobStatus, CompanionProgress } from "@/lib/types";
 import { MarkdownContent } from "@/components/MarkdownContent";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { GenerationStudio } from "@/components/generation-studio/GenerationStudio";
@@ -114,7 +114,7 @@ export default function CourseOverviewPage() {
   const [auditError, setAuditError] = useState("");
   const [auditResult, setAuditResult] = useState<TerminologyAuditReport | null>(null);
   const [savingFigureMode, setSavingFigureMode] = useState(false);
-  const [lectureProgressMap, setLectureProgressMap] = useState<Record<string, LectureProgress>>({});
+  const [companionProgressMap, setCompanionProgressMap] = useState<Record<string, CompanionProgress>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -131,12 +131,12 @@ export default function CourseOverviewPage() {
         if (!cancelled) setLoadError("读取课程失败，请稍后重试。");
       });
 
-    apiFetch(`/api/courses/${id}/lecture-progress`)
+    apiFetch(`/api/courses/${id}/companion-progress`)
       .then((response) => (response.ok ? response.json() : undefined))
       .then((data) => {
         if (cancelled) return;
         if (data && typeof data === "object" && "progress" in data && data.progress && typeof data.progress === "object") {
-          setLectureProgressMap(data.progress as Record<string, LectureProgress>);
+          setCompanionProgressMap(data.progress as Record<string, CompanionProgress>);
         }
       })
       .catch(() => undefined);
@@ -401,11 +401,9 @@ export default function CourseOverviewPage() {
         <div className="mb-8 rounded-lg border border-border bg-card p-6 md:p-8">
           <div className="mb-4 flex items-center justify-between">
             <h1 className="font-mono text-2xl font-bold text-foreground md:text-3xl">{course.topic}</h1>
-            {isTextbook && (
-              <span className="inline-flex items-center gap-1 rounded-full border border-foreground/20 bg-foreground/5 px-3 py-1 text-xs font-medium text-foreground">
-                <BookMarked size={13} /> 教材模式
-              </span>
-            )}
+            <span className="inline-flex items-center gap-1 rounded-full border border-foreground/20 bg-foreground/5 px-3 py-1 text-xs font-medium text-foreground">
+              <BookMarked size={13} /> {isTextbook ? "电子教材" : "电子讲义"}
+            </span>
             <span className="rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">
               {backgroundJob ? "后台生成中" : course.generationJobId ? "MAOL 已规划" : "课程就绪"}
             </span>
@@ -425,14 +423,14 @@ export default function CourseOverviewPage() {
               disabled={Boolean(exporting)}
               className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
             >
-              <Download size={14} /> {exporting === "pdf" ? "导出中" : "导出 PDF"}
+              <Download size={14} /> {exporting === "pdf" ? "导出中" : isTextbook ? "导出教材 PDF" : "导出讲义 PDF"}
             </button>
             <button
               onClick={() => exportCourse("tex")}
               disabled={Boolean(exporting)}
               className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
             >
-              <Download size={14} /> {exporting === "tex" ? "导出中" : "导出 TeX"}
+              <Download size={14} /> {exporting === "tex" ? "导出中" : isTextbook ? "导出教材 TeX" : "导出讲义 TeX"}
             </button>
             <button
               onClick={() => void runTerminologyAudit()}
@@ -521,7 +519,7 @@ export default function CourseOverviewPage() {
                   教材大纲等待确认
                 </div>
                 <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-                  教材模式会先确认全书结构，再开始生成章节正文。确认后会生成教材地图，并按章节队列写正文。
+                  电子教材会先确认全书结构，再开始生成章节正文。确认后会生成教材地图，并按章节队列写正文。
                 </p>
               </div>
               <Link
@@ -688,12 +686,12 @@ export default function CourseOverviewPage() {
                         <Clock size={12} />
                         {formatMinutes(totalMinutes(chapter.time))}
                       </span>
-                      {lectureProgressMap[chapter.id]?.completed && (
+                      {companionProgressMap[chapter.id]?.completed && (
                         <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
                           <CheckCircle2 size={12} />
-                          讲义已学
-                          {lectureProgressMap[chapter.id]?.quizScore !== undefined && lectureProgressMap[chapter.id]?.quizTotal !== undefined && (
-                            <span className="font-mono">({lectureProgressMap[chapter.id].quizScore}/{lectureProgressMap[chapter.id].quizTotal})</span>
+                          伴学已完成
+                          {companionProgressMap[chapter.id]?.quizScore !== undefined && companionProgressMap[chapter.id]?.quizTotal !== undefined && (
+                            <span className="font-mono">({companionProgressMap[chapter.id].quizScore}/{companionProgressMap[chapter.id].quizTotal})</span>
                           )}
                         </span>
                       )}

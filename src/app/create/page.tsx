@@ -222,15 +222,15 @@ function CreateCourseContent() {
           transition={{ duration: 0.6 }}
         >
           <h1 className="mb-2 font-mono text-2xl font-bold text-foreground">
-            {contentMode === "textbook" ? "定制你的专属教材" : "定制你的专属课程"}
+            {contentMode === "textbook" ? "定制你的专属教材" : "定制你的电子讲义"}
           </h1>
           <p className="mb-4 text-sm text-muted-foreground">
             {contentMode === "textbook"
               ? "教材模式会先生成全书大纲，确认后再分章生成正文。插图会根据你的生图模型配置自动选择模型生图或默认代码渲染。"
-              : "让多个 AI Agent 为你量身打造系统的学习内容"}
+              : "电子讲义模式：生成轻量、篇幅更短的讲义，可导出讲义 PDF。"}
           </p>
           <div className="mb-8 inline-flex rounded-full border border-border bg-muted/40 px-3 py-1 text-xs text-muted-foreground">
-            {contentMode === "textbook" ? "教材模式 · 先确认大纲" : "讲义模式 · 快速生成"}
+            {contentMode === "textbook" ? "电子教材 · 先确认大纲" : "电子讲义 · 快速生成"}
           </div>
 
           {draft && !loading && (

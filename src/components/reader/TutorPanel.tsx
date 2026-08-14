@@ -22,6 +22,7 @@ type TutorPanelProps = {
   courseId: string;
   chapterId: string;
   onClose: () => void;
+  initialQuestion?: string;
 };
 
 export function TutorPanel({
@@ -29,6 +30,7 @@ export function TutorPanel({
   courseId,
   chapterId,
   onClose,
+  initialQuestion,
 }: TutorPanelProps) {
   const router = useRouter();
   const { active, target, answering, annotations, error, historyScope } = tutor;
@@ -243,6 +245,7 @@ export function TutorPanel({
           <div className="relative flex-1">
             <span className="pointer-events-none absolute left-3 top-2.5 font-mono text-[12px] text-primary">{">"}</span>
             <textarea
+          defaultValue={initialQuestion}
               name="question"
               rows={1}
               onInput={(event) => resizeComposer(event.currentTarget)}

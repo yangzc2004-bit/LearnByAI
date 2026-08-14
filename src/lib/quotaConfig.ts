@@ -17,6 +17,9 @@ const LIMIT_ENV: Record<UsageEvent["action"], string> = {
   generate_companion: "QUOTA_GENERATE_COMPANION",
   ask_tutor: "QUOTA_ASK_TUTOR",
   export: "QUOTA_EXPORT",
+  revise: "QUOTA_REVISE",
+};
+
 export function readQuotaLimit(action: UsageEvent["action"]) {
   const configured = process.env[LIMIT_ENV[action]]
     ?? (action === "generate_companion" ? process.env.QUOTA_GENERATE_LECTURE : undefined)

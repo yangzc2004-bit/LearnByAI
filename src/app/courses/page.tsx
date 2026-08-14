@@ -175,7 +175,7 @@ export default function CoursesPage() {
                               ? "border-foreground/20 bg-foreground/5 text-foreground"
                               : "border-border bg-background text-muted-foreground"
                           }`}>
-                            {isTextbook ? "教材模式" : "讲义模式"}
+                            {isTextbook ? "电子教材" : "电子讲义"}
                           </span>
                         </div>
                         {isTextbook && (

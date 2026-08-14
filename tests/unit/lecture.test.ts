@@ -58,7 +58,7 @@ test("buildLecturePrompt anchors the lecture to the chapter content and bible ru
   assert.ok(prompt.includes("禁止输出不带 $ 的裸 LaTeX"), prompt);
 });
 
-test("extractChapterSectionNumbers collects unique N.M headings only", () => {
+test("extractChapterSectionNumbers collects numbered and unnumbered headings", () => {
   const numbers = extractChapterSectionNumbers([
     "# 3 动态规划",
     "## 3.1 策略评估",
@@ -66,9 +66,10 @@ test("extractChapterSectionNumbers collects unique N.M headings only", () => {
     "## 3.2.1 细节",
     "正文里的 3.3 不是标题",
     "## 练习",
+    "## 问题导入",
   ].join("\n"));
-  assert.deepEqual(numbers, ["3.1", "3.2", "3.2.1"]);
-  assert.deepEqual(extractChapterSectionNumbers("没有编号小节"), []);
+  assert.deepEqual(numbers, ["3.1", "3.2", "3.2.1", "练习", "问题导入"]);
+  assert.deepEqual(extractChapterSectionNumbers("没有 ## 标题"), []);
 });
 
 test("parseLecture accepts a well-formed lecture payload", () => {
@@ -143,7 +144,7 @@ test("parseLecture normalizes junk entries and drops bad quiz options", () => {
   const first = teachBlocks[0] as Extract<(typeof teachBlocks)[number], { kind: "teach" }>;
   assert.equal(first.anchorSection, "3.1");
   const second = teachBlocks[1] as Extract<(typeof teachBlocks)[number], { kind: "teach" }>;
-  assert.equal(second.anchorSection, undefined);
+  assert.equal(second.anchorSection, "不是编号");
   const recap = lecture.blocks!.find((block) => block.kind === "recap") as { points: string[] };
   assert.deepEqual(recap.points, ["一", "二", "三"]);
   assert.equal(lecture.selfCheck!.length, 4);
