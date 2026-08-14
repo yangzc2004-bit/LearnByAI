@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   applyTerminologyReplacements,
   applyTerminologyReplacementsToString,
+  buildConflictJudgementPrompt,
   buildConflictMap,
   chooseCanonicalReplacements,
   countVariantOccurrences,
@@ -101,6 +102,64 @@ test("buildConflictMap locates chapters and countVariantOccurrences counts outsi
   assert.deepEqual(markov!.chapters, [1, 2]);
   countVariantOccurrences(contents, conflicts);
   assert.equal(markov!.occurrences, 4);
+});
+
+test("buildConflictMap keeps chapters that only carry the spelling in the TITLE", () => {
+  // 马尔科夫 appears only in chapter 2's title, nowhere in any body.
+  const contents = ["正文只写马尔可夫。", "正文也只写马尔可夫。"];
+  const titles = ["引言", "马尔科夫决策过程"];
+  const conflicts = buildConflictMap(
+    [{ key: "a", variants: ["马尔可夫", "马尔科夫"] }],
+    contents,
+    titles,
+  );
+  const markov = conflicts.get("a");
+  assert.ok(markov, JSON.stringify([...conflicts.keys()]));
+  assert.deepEqual(markov!.chapters, [1, 2]);
+});
+
+test("countVariantOccurrences counts title occurrences too", () => {
+  const conflicts = buildConflictMap(
+    [{ key: "a", variants: ["马尔可夫", "马尔科夫"] }],
+    ["马尔可夫 马尔可夫", ""],
+    ["", "马尔科夫决策过程"],
+  );
+  countVariantOccurrences(["马尔可夫 马尔可夫", ""], conflicts, ["", "马尔科夫决策过程"]);
+  assert.equal(conflicts.get("a")?.occurrences, 3);
+});
+
+test("chooseCanonicalReplacements replaces a title-only spelling with the body form", () => {
+  const conflicts = buildConflictMap(
+    [{ key: "a", variants: ["马尔可夫", "马尔科夫"] }],
+    ["马尔可夫 马尔可夫 马尔可夫", ""],
+    ["", "马尔科夫决策过程"],
+  );
+  const { replacements } = chooseCanonicalReplacements(
+    conflicts,
+    ["马尔可夫 马尔可夫 马尔可夫", ""],
+    [],
+    ["", "马尔科夫决策过程"],
+  );
+  assert.deepEqual(replacements, [{ from: "马尔科夫", to: "马尔可夫" }]);
+});
+
+test("buildConflictMap numbers chapters by the FULL list, not the filtered one", () => {
+  // Real chapter 2 has no content; the conflict lives in real chapter 3.
+  const contents = ["第一章正文。", "", "第三章：马尔可夫与马尔科夫并存。"];
+  const conflicts = buildConflictMap(
+    [{ key: "a", variants: ["马尔可夫", "马尔科夫"] }],
+    contents,
+  );
+  assert.deepEqual(conflicts.get("a")?.chapters, [3]);
+});
+
+test("buildConflictJudgementPrompt labels title-only spellings with their chapter", () => {
+  const prompt = buildConflictJudgementPrompt(
+    [{ variants: ["马尔可夫", "马尔科夫"] }],
+    ["正文只写马尔可夫。"],
+    ["马尔科夫决策过程"],
+  );
+  assert.ok(prompt.includes("仅出现在第 1 章标题「马尔科夫决策过程」中"), prompt);
 });
 
 test("chooseCanonicalReplacements picks the most frequent form and drops non-CJK pairs", () => {

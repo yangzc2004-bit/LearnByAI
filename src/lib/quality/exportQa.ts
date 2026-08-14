@@ -264,3 +264,12 @@ export function formatQaWarnings(issues: ExportQaIssue[]) {
     (item) => `[${item.severity}] ${item.check}: ${item.message}（${item.context}）`,
   );
 }
+
+/**
+ * Error-severity findings are print defects (heading hashes printed raw, math
+ * leaking into text mode, orphan subsubsection numbering). The exporter must
+ * NOT deliver a PDF that contains them — treat them as blocking.
+ */
+export function hasBlockingExportQaIssues(issues: ExportQaIssue[]) {
+  return issues.some((item) => item.severity === "error");
+}

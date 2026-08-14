@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { qaChapterMarkdownForExport, qaGeneratedTex } from "../../src/lib/quality/exportQa";
+import { hasBlockingExportQaIssues, qaChapterMarkdownForExport, qaGeneratedTex } from "../../src/lib/quality/exportQa";
 
 test("qaGeneratedTex passes a clean generated chapter", () => {
   const tex = [
@@ -97,4 +97,21 @@ test("qaChapterMarkdownForExport passes clean markdown", () => {
     "```",
   ].join("\n");
   assert.deepEqual(qaChapterMarkdownForExport(md), []);
+});
+
+test("hasBlockingExportQaIssues treats error-severity findings as blocking", () => {
+  assert.equal(
+    hasBlockingExportQaIssues([
+      { check: "export_qa.heading_residue", severity: "error", message: "x", context: "x" },
+      { check: "export_qa.backtick", severity: "warning", message: "x", context: "x" },
+    ]),
+    true,
+  );
+  assert.equal(
+    hasBlockingExportQaIssues([
+      { check: "export_qa.backtick", severity: "warning", message: "x", context: "x" },
+    ]),
+    false,
+  );
+  assert.equal(hasBlockingExportQaIssues([]), false);
 });

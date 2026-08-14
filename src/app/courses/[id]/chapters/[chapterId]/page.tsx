@@ -227,7 +227,15 @@ export default function ReaderPage() {
       link.click();
       link.remove();
       URL.revokeObjectURL(link.href);
-      toast.success(options.successMessage);
+      const qaWarnings = data.export.qaWarnings ?? [];
+      if (qaWarnings.length > 0) {
+        toast.warning("导出质检提醒（PDF 已生成，请留意）", {
+          description: qaWarnings.join("；"),
+          duration: 15000,
+        });
+      } else {
+        toast.success(options.successMessage);
+      }
     } catch (error) {
       toast.error(publicSafeErrorMessage(error, "导出失败，请稍后重试。"));
     } finally {

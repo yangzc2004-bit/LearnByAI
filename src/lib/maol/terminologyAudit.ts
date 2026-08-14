@@ -156,6 +156,7 @@ export function generateChapterCandidatePairs(
 export function rankBookCandidates(
   chapterPairs: { variants: string[]; rare: number; imbalance: number; total: number; title: boolean }[][],
   chapterContents: string[],
+  titleContents: string[] = [],
   maxPairs = 60,
 ) {
   const merged = new Map<string, { variants: string[]; rare: number; imbalance: number; total: number; title: boolean }>();
@@ -171,7 +172,13 @@ export function rankBookCandidates(
   return [...merged.values()]
     .map((pair) => {
       const counts = pair.variants.map((variant) =>
-        chapterContents.reduce((sum, content) => sum + occurrencesOutsideFences(content, variant), 0),
+        chapterContents.reduce(
+          (sum, content, index) =>
+            sum +
+            occurrencesOutsideFences(content, variant) +
+            occurrencesInTitle(titleContents[index] ?? "", variant),
+          0,
+        ),
       );
       return {
         variants: pair.variants,
@@ -205,22 +212,31 @@ export function excerptAround(content: string, token: string, radius = 50): stri
 export function buildConflictJudgementPrompt(
   pairs: { variants: string[] }[],
   chapterContents: string[],
+  titleContents: string[] = [],
 ) {
   const evidence = pairs
     .slice(0, MAX_JUDGE_PAIRS)
     .map((pair, index) => {
       const [a, b] = pair.variants;
-      const chapter = chapterContents.find(
-        (content) =>
-          occurrencesOutsideFences(content, a ?? "") > 0 &&
-          occurrencesOutsideFences(content, b ?? "") > 0,
+      const chapterIndex = chapterContents.findIndex(
+        (content, i) =>
+          (occurrencesOutsideFences(content, a ?? "") > 0 || occurrencesInTitle(titleContents[i] ?? "", a ?? "") > 0) &&
+          (occurrencesOutsideFences(content, b ?? "") > 0 || occurrencesInTitle(titleContents[i] ?? "", b ?? "") > 0),
       );
-      const excerptA = chapter ? excerptAround(chapter, a ?? "") : "";
-      const excerptB = chapter ? excerptAround(chapter, b ?? "") : "";
+      const excerptA = chapterIndex >= 0 ? excerptAround(chapterContents[chapterIndex] ?? "", a ?? "") : "";
+      const excerptB = chapterIndex >= 0 ? excerptAround(chapterContents[chapterIndex] ?? "", b ?? "") : "";
+      // A variant that lives only in the chapter title has no body context —
+      // say so explicitly instead of showing an empty excerpt.
+      const contextFor = (variant: string, excerpt: string) =>
+        excerpt
+          ? `…${excerpt}…`
+          : occurrencesInTitle(titleContents[chapterIndex] ?? "", variant) > 0
+            ? `（仅出现在第 ${chapterIndex + 1} 章标题「${titleContents[chapterIndex]}」中）`
+            : "（未找到上下文）";
       return [
         `${index + 1}. 「${a}」 / 「${b}」`,
-        excerptA ? `   「${a}」上下文：…${excerptA}…` : "",
-        excerptB ? `   「${b}」上下文：…${excerptB}…` : "",
+        `   「${a}」上下文：${contextFor(a ?? "", excerptA)}`,
+        `   「${b}」上下文：${contextFor(b ?? "", excerptB)}`,
       ].filter(Boolean).join("\n");
     })
     .join("\n");
@@ -318,17 +334,26 @@ export function mergeTransitiveGroups(
     .map((variants) => ({ key: variants.join("\u0000"), variants }));
 }
 
-/** Map verified conflict groups into book-wide conflicts and locate chapters. */
+/** Map verified conflict groups into book-wide conflicts and locate chapters.
+ *  Chapter titles count as part of the chapter, so a spelling that lives only
+ *  in a title still enters the conflict table and triggers the title fix. */
 export function buildConflictMap(
   groups: { key: string; variants: string[] }[],
   chapterContents: string[],
+  titleContents: string[] = [],
 ): Map<string, TerminologyConflict> {
   const conflicts = new Map<string, TerminologyConflict>();
   for (const group of groups) {
     if (!group.key) continue;
     const chapters: number[] = [];
     for (let index = 0; index < chapterContents.length; index += 1) {
-      if (group.variants.some((variant) => occurrencesOutsideFences(chapterContents[index] ?? "", variant) > 0)) {
+      if (
+        group.variants.some(
+          (variant) =>
+            occurrencesOutsideFences(chapterContents[index] ?? "", variant) > 0 ||
+            occurrencesInTitle(titleContents[index] ?? "", variant) > 0,
+        )
+      ) {
         chapters.push(index + 1);
       }
     }
@@ -343,13 +368,19 @@ export function buildConflictMap(
   return conflicts;
 }
 
-/** Count every variant's occurrences across the book (outside code fences). */
-export function countVariantOccurrences(chapterContents: string[], conflicts: Map<string, TerminologyConflict>) {
+/** Count every variant's occurrences across the book (body outside code
+ *  fences, plus chapter titles). */
+export function countVariantOccurrences(
+  chapterContents: string[],
+  conflicts: Map<string, TerminologyConflict>,
+  titleContents: string[] = [],
+) {
   for (const conflict of conflicts.values()) {
     let total = 0;
     for (const variant of conflict.variants) {
-      for (const content of chapterContents) {
-        total += occurrencesOutsideFences(content, variant);
+      for (let index = 0; index < chapterContents.length; index += 1) {
+        total += occurrencesOutsideFences(chapterContents[index] ?? "", variant);
+        total += occurrencesInTitle(titleContents[index] ?? "", variant);
       }
     }
     conflict.occurrences = total;
@@ -369,6 +400,7 @@ export function chooseCanonicalReplacements(
   conflicts: Map<string, TerminologyConflict>,
   chapterContents: string[],
   bibleTerms: { term: string; definition?: string }[],
+  titleContents: string[] = [],
 ): { replacements: TerminologyReplacement[]; conflicts: TerminologyConflict[] } {
   const replacements: TerminologyReplacement[] = [];
   const resolved: TerminologyConflict[] = [];
@@ -391,7 +423,13 @@ export function chooseCanonicalReplacements(
     const bibleForm = bibleMatch?.term;
 
     const counts = distinct.map((variant) =>
-      chapterContents.reduce((sum, content) => sum + occurrencesOutsideFences(content, variant), 0),
+      chapterContents.reduce(
+        (sum, content, index) =>
+          sum +
+          occurrencesOutsideFences(content, variant) +
+          occurrencesInTitle(titleContents[index] ?? "", variant),
+        0,
+      ),
     );
     const canonical = bibleForm && distinct.includes(bibleForm)
       ? bibleForm
@@ -472,37 +510,43 @@ function occurrencesOutsideFences(content: string, token: string) {
   return count;
 }
 
+/** Title occurrences are plain string counts — no fences in a title. */
+function occurrencesInTitle(title: string, token: string) {
+  return title.split(token).length - 1;
+}
+
 export async function runTerminologyAudit(
   course: Course,
   options: { overrides?: ModelOverrides; request?: Request; dryRun?: boolean } = {},
 ): Promise<TerminologyAuditReport> {
-  const chapters = course.chapters.filter((chapter) => {
-    const content = chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
-    return content.trim().length > 0;
-  });
-  if (chapters.length < 2) {
+  // Keep arrays aligned to the FULL chapter list — an empty chapter must not
+  // shift the 1-based chapter numbers in the report.
+  const allChapters = course.chapters;
+  const fullContents = allChapters.map(
+    (chapter) => chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "",
+  );
+  const fullTitles = allChapters.map((chapter) => chapter.title);
+  const chaptersWithContent = allChapters.filter((_chapter, index) => fullContents[index]?.trim().length > 0);
+  if (chaptersWithContent.length < 2) {
     return { status: "skipped", conflicts: [], rejected: [], replacements: [], appliedToChapters: [] };
   }
 
   try {
-    const chapterContents = chapters.map(
-      (chapter) => chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "",
-    );
-
     // Stage 1 (deterministic, free): per-chapter gram pairing — every frequent
     // gram matched against ALL same-length grams (rare spellings included),
     // chapter titles matched against the body and ranked first — then a
     // book-level rank that puts the rare-side-first inconsistencies (the
-    // 1-vs-65 signature) at the top of the judge's list.
-    const chapterPairs = chapterContents.map((content, index) =>
-      generateChapterCandidatePairs(content, chapters[index]?.title),
+    // 1-vs-65 signature) at the top of the judge's list. Empty chapters
+    // produce no pairs but keep their index so numbering stays true.
+    const chapterPairs = fullContents.map((content, index) =>
+      generateChapterCandidatePairs(content, fullTitles[index]),
     );
-    const candidates = rankBookCandidates(chapterPairs, chapterContents);
+    const candidates = rankBookCandidates(chapterPairs, fullContents, fullTitles);
 
     // Stage 2 (one LLM call): evidence-backed judge over the ranked pairs.
     const judgeRaw = await dispatchAgentText({
       agent: "REVIEWER",
-      prompt: buildConflictJudgementPrompt(candidates, chapterContents),
+      prompt: buildConflictJudgementPrompt(candidates, fullContents, fullTitles),
       temperature: 0.1,
       maxTokens: 4096,
       timeoutMs: AUDIT_TIMEOUT_MS,
@@ -526,20 +570,23 @@ export async function runTerminologyAudit(
     // canonical target, never two contradictory replacements.
     const mergedGroups = mergeTransitiveGroups(groups);
 
-    const conflicts = buildConflictMap(mergedGroups, chapterContents);
-    countVariantOccurrences(chapterContents, conflicts);
+    const conflicts = buildConflictMap(mergedGroups, fullContents, fullTitles);
+    countVariantOccurrences(fullContents, conflicts, fullTitles);
     const { replacements, conflicts: resolved } = chooseCanonicalReplacements(
       conflicts,
-      chapterContents,
+      fullContents,
       course.courseBible.terminology ?? [],
+      fullTitles,
     );
 
     if (replacements.length === 0) {
       return { status: "ok", conflicts: resolved, rejected, replacements: [], appliedToChapters: [] };
     }
 
+    // Apply to EVERY chapter (not just chapters with content): a spelling
+    // that lives only in an empty chapter's title still gets unified.
     const appliedToChapters: TerminologyAuditReport["appliedToChapters"] = [];
-    for (const chapter of chapters) {
+    for (const chapter of allChapters) {
       const content = chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
       const { content: nextContent, applied } = applyTerminologyReplacements(content, replacements);
       const nextTitle = applyTerminologyReplacementsToString(chapter.title, replacements);

@@ -8,13 +8,26 @@ import { createFigureMarkdownRe } from "./figures";
 import { ILLUSTRATION_URL_PREFIX, readIllustrationImage } from "./illustration";
 import { createSupabaseServiceClient } from "./supabase/server";
 import { rasterizeSvg, renderCoursePdf } from "./pdf";
-import { formatQaWarnings, qaChapterMarkdownForExport, qaGeneratedTex } from "./quality/exportQa";
+import { formatQaWarnings, hasBlockingExportQaIssues, qaChapterMarkdownForExport, qaGeneratedTex } from "./quality/exportQa";
 import { safeErrorMessage } from "./safeError";
 import { compileLatexProject, TeXCompileError } from "./texCompiler";
 import { Course, ExportJob } from "./types";
 
 const exportJobs = new Map<string, ExportJob>();
 const UNGENERATED_CHAPTER_TEXT = "This chapter has not been generated yet.";
+
+/**
+ * Raised when post-conversion QA finds print defects (raw heading hashes,
+ * math leaking into text mode, orphan sub-level numbering). Blocking: the
+ * export fails loudly instead of delivering a PDF with the defect — and it
+ * must NOT fall back to the HTML render, which would show the same defect.
+ */
+export class ExportQaBlockError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExportQaBlockError";
+  }
+}
 
 export async function createCourseExport(
   course: Course,
@@ -73,8 +86,16 @@ async function buildExportContent(
   if (course.contentMode === "textbook" && !chapter) {
     try {
       const result = await renderTextbookPdf(course, exportId);
-      return { content: result.pdf, qaWarnings: result.qaWarnings };
+      if (hasBlockingExportQaIssues(result.qa)) {
+        throw new ExportQaBlockError(
+          `导出质检发现阻断性问题，已阻止交付损坏的 PDF：\n${formatQaWarnings(result.qa).join("\n")}`,
+        );
+      }
+      return { content: result.pdf, qaWarnings: formatQaWarnings(result.qa) };
     } catch (error) {
+      // QA blocks are intentional failures: rethrow instead of falling back to
+      // the HTML render, which would print the same defect.
+      if (error instanceof ExportQaBlockError) throw error;
       // The designed TeX pipeline failed (e.g. a LaTeX error in some chapter
       // content). Fall back to the HTML print render so a whole-book export
       // never hard-fails — the user still gets a complete PDF.
@@ -204,7 +225,7 @@ async function renderTextbookPdf(course: Course, exportId: string) {
 
   try {
     const result = await compileLatexProject(mainTexPath);
-    return { pdf: result.pdf, qaWarnings: formatQaWarnings(qa) };
+    return { pdf: result.pdf, qa };
   } catch (error) {
     if (error instanceof TeXCompileError) {
       throw new Error(

@@ -87,6 +87,7 @@ function chapterTone(chapter: Course["chapters"][number], currentJobStatus?: Job
 type TerminologyAuditReport = {
   status: "ok" | "skipped" | "failed";
   conflicts: { key: string; variants: string[]; occurrences: number; chapters: number[] }[];
+  rejected: { variants: string[]; reason: string }[];
   replacements: { from: string; to: string }[];
   appliedToChapters: { chapterId: string; title: string; replacements: number }[];
   error?: string;
@@ -97,6 +98,7 @@ export default function CourseOverviewPage() {
   const [course, setCourse] = useState<Course>();
   const [exporting, setExporting] = useState<ExportJob["format"] | "">("");
   const [exportError, setExportError] = useState("");
+  const [exportWarnings, setExportWarnings] = useState<string[]>([]);
   const [backgroundJob, setBackgroundJob] = useState("");
   const [jobStatus, setJobStatus] = useState<Record<string, JobStatus>>({});
   const [jobErrors, setJobErrors] = useState<Record<string, string>>({});
@@ -259,6 +261,7 @@ export default function CourseOverviewPage() {
     if (!course) return;
     setExporting(format);
     setExportError("");
+    setExportWarnings([]);
 
     try {
       const response = await apiFetch("/api/exports", {
@@ -267,6 +270,9 @@ export default function CourseOverviewPage() {
       });
       const data = await response.json();
       if (!response.ok || !data.export) throw new Error(data.error ?? "Export failed");
+      // Surface export QA findings instead of downloading silently — the user
+      // must see residue markers, fallback notes, or heading-level gaps.
+      setExportWarnings(data.export.qaWarnings ?? []);
       const downloadResponse = await apiFetch(`/api/exports/${data.export.id}`);
       if (!downloadResponse.ok) throw new Error("Export download failed");
       const blob = await downloadResponse.blob();
@@ -295,9 +301,16 @@ export default function CourseOverviewPage() {
         method: "POST",
         body: JSON.stringify({}),
       });
-      const data = (await response.json().catch(() => ({}))) as { report?: TerminologyAuditReport; error?: string };
+      const data = (await response.json().catch(() => ({}))) as {
+        report?: TerminologyAuditReport;
+        course?: Course;
+        error?: string;
+      };
       if (!response.ok || !data.report) throw new Error(data.error ?? "术语一致性审计失败。");
       setAuditResult(data.report);
+      // The route returns the persisted course; refresh it so the page never
+      // keeps showing pre-audit chapter titles/bodies.
+      if (data.course) setCourse(data.course);
     } catch (error) {
       setAuditError(publicSafeErrorMessage(error, "术语一致性审计失败。"));
     } finally {
@@ -400,6 +413,16 @@ export default function CourseOverviewPage() {
             </button>
           </div>
           {exportError && <p className="mt-4 text-sm text-destructive">{exportError}</p>}
+          {exportWarnings.length > 0 && (
+            <div className="mt-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">
+              <p className="mb-1 font-medium">导出质检提醒（PDF 已生成，请留意以下问题）：</p>
+              <ul className="list-disc space-y-0.5 pl-5">
+                {exportWarnings.map((warning, index) => (
+                  <li key={index}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           {auditError && <p className="mt-4 text-sm text-destructive">{auditError}</p>}
           {auditResult && (
             <div className="mt-4 space-y-1 rounded-md border border-border bg-background p-3 text-xs text-muted-foreground">
@@ -426,6 +449,20 @@ export default function CourseOverviewPage() {
                     <p>未执行替换（没有安全的替换对，或冲突写法未在正文中出现）。</p>
                   )}
                 </>
+              )}
+              {auditResult.rejected.length > 0 && (
+                <details className="mt-1">
+                  <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                    已排除 {auditResult.rejected.length} 组「形似但不同概念」候选（未做替换）
+                  </summary>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                    {auditResult.rejected.map((item, index) => (
+                      <li key={index}>
+                        「{item.variants.join(" / ")}」：{item.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
               )}
             </div>
           )}
