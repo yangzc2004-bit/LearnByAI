@@ -70,7 +70,9 @@ export function buildTermExtractionPrompt(
 规则：
 - 只列真实出现在正文中的词，禁止编造。
 - 特别留意：同一概念在本章若有多种写法（如「马尔科夫」与「马尔可夫」、「同策略」与「在策略」），两种写法都要列出，这是本次提取的重点。
-- 按出现顺序列出，最多 ${MAX_TERMS_PER_CHAPTER} 个；重复出现的只列一次。
+- 禁止组合式枚举：不要拿两个词拼出新词（如「TD(0)预测的SARSA收敛条件」这种拼接项）；只列正文中原样出现的术语。
+- 按出现顺序列出，最多 ${MAX_TERMS_PER_CHAPTER} 个；重复出现的只列一次；若术语多于 60 个，只列前 60 个。
+- 总输出控制在约 1500 token 以内，严禁长篇输出。
 - 术语表用于全书一致性检查，宁可多列不可漏列。
 - 只输出 JSON，第一个字符必须是 {，最后一个字符必须是 }。
 
@@ -496,23 +498,30 @@ export async function runTerminologyAudit(
       const content = chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
       const chunks = splitChapterForExtraction(content);
       const termSets = await runInBatches(chunks, 1, async (chunk) => {
-        const raw = await dispatchAgentText({
-          agent: "REVIEWER",
-          prompt: buildTermExtractionPrompt(
-            course,
-            chunk,
-            course.chapters.findIndex((item) => item.id === chapter.id) + 1,
-            chapter.title,
-          ),
-          temperature: 0.1,
-          maxTokens: 4096,
-          timeoutMs: AUDIT_TIMEOUT_MS,
-          maxAttempts: 1,
-          responseFormat: "json_object",
-          overrides: options.overrides,
-          mock: () => JSON.stringify({ terms: [] }),
-        });
-        return parseChapterTerms(raw);
+        try {
+          const raw = await dispatchAgentText({
+            agent: "REVIEWER",
+            prompt: buildTermExtractionPrompt(
+              course,
+              chunk,
+              course.chapters.findIndex((item) => item.id === chapter.id) + 1,
+              chapter.title,
+            ),
+            temperature: 0.1,
+            maxTokens: 2048,
+            timeoutMs: AUDIT_TIMEOUT_MS,
+            maxAttempts: 1,
+            responseFormat: "json_object",
+            overrides: options.overrides,
+            mock: () => JSON.stringify({ terms: [] }),
+          });
+          return parseChapterTerms(raw);
+        } catch (error) {
+          // One failed chunk must not sink the whole audit — degrade to fewer
+          // enumerated terms instead of a total failure.
+          console.warn(`[terminologyAudit] enumeration chunk failed: ${safeErrorMessage(error, "REVIEWER enumeration failed")}`);
+          return [];
+        }
       });
       return [...new Set(termSets.flat())];
     });
