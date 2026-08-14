@@ -201,6 +201,37 @@ test("markdownToTex escapes bare ^ outside math", async () => {
   assert.ok(!/\^/u.test(tex), `bare ^ must be escaped: ${tex}`);
 });
 
+test("markdownToTex converts bold with nested italics (reading-list citations)", async () => {
+  const md = "1. **Odum, E. P. (2005). *Fundamentals of Ecology* (5th ed.).** 经典生态学教材。";
+  const tex = await markdownToTex(md);
+  assert.ok(tex.includes("\\textbf{Odum, E. P. (2005). \\emph{Fundamentals of Ecology} (5th ed.).}"), tex);
+  assert.ok(!tex.includes("**"), tex);
+});
+
+test("markdownToTex splits an oversized heading with a folded paragraph", async () => {
+  const longBody = "代理模型方法的核心风险在于模型失配，这种风险在生态系统中尤为突出。".repeat(3);
+  const tex = await markdownToTex(`## 讨论：${longBody}\n\n正文段落。`);
+  assert.ok(tex.includes("\\section{讨论}"), tex);
+  assert.ok(!tex.includes("\\section{讨论："), tex);
+  assert.ok(tex.includes("正文段落。"), tex);
+});
+
+test("markdownToTex unfences prose trapped in empty-language fences", async () => {
+  const md = "```\n\n代码中 `step` 方法按顺序执行三个机制。\n\n```\n\n下面。";
+  const tex = await markdownToTex(md);
+  assert.ok(tex.includes("代码中 \\texttt{step} 方法"), tex);
+  assert.ok(!tex.includes("lstlisting"), tex);
+  assert.ok(tex.includes("下面。"), tex);
+});
+
+test("markdownToTex turns a bare language line into a code fence", async () => {
+  const md = "前文。\n\npython\n\nfrom scipy.optimize import minimize\n\ndef proxy(x):\n    return x\n\n结尾。";
+  const tex = await markdownToTex(md);
+  assert.ok(tex.includes("\\begin{lstlisting}"), tex);
+  assert.ok(tex.includes("from scipy.optimize import minimize"), tex);
+  assert.ok(tex.includes("结尾。"), tex);
+});
+
 test("markdownToTex strips writer numbering from section headings (TeX counters own numbers)", async () => {
   const tex = await markdownToTex("## 3.2 策略迭代\n\n### 3.2.1 收敛性");
   assert.ok(tex.includes("\\section{策略迭代}"), tex);

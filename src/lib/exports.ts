@@ -403,9 +403,118 @@ function notationSymbolTex(symbol: string) {
  * figures via the shared figure regex. HTML comments (failed-figure markers)
  * are dropped.
  */
+const CODE_LANGUAGE_LINE = /^(?:python|py|r|julia|matlab|octave|bash|sh|shell|sql|text|markdown|md|javascript|js|typescript|ts|json|yaml|yml|latex|tex)$/iu;
+const STRONG_CODE_START = /^\s*(?:def|class|return|import|from|async|await)\b/u;
+
+/**
+ * Normalize the writer's malformed code fences before TeX conversion:
+ * - prose trapped inside an empty-language fence is unfenced;
+ * - a bare language line ("python" on its own line) becomes a fence opener and
+ *   swallows the code run that follows it;
+ * - bare code right after a closing ```lang fence is re-fenced with that
+ *   language.
+ */
+function normalizeExportFences(content: string): string {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const out: string[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    const fence = line.match(/^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_+#.-]*)\s*$/u);
+    if (fence) {
+      const token = fence[1] ?? "```";
+      const language = fence[2] ?? "";
+      let closer = index + 1;
+      while (closer < lines.length && !(lines[closer] ?? "").trimStart().startsWith(token)) closer += 1;
+      const body = lines.slice(index + 1, closer);
+      const hasCloser = closer < lines.length;
+
+      if (!language && body.join("").trim() && looksLikeProseBody(body.join("\n"))) {
+        // Prose trapped in an empty-language fence: drop both fences.
+        out.push(...body);
+        index = hasCloser ? closer + 1 : lines.length;
+        continue;
+      }
+
+      out.push(line, ...body);
+      if (hasCloser) out.push(lines[closer] ?? "");
+      index = hasCloser ? closer + 1 : lines.length;
+
+      // Bare code immediately after a closed ```lang fence.
+      if (language) {
+        const next = nextNonBlankIndex(lines, index);
+        if (next !== undefined && STRONG_CODE_START.test(lines[next] ?? "")) {
+          const run = collectCodeRun(lines, next);
+          if (run.block.length) {
+            out.push("", `\`\`\`${language}`, ...run.block, "```", "");
+            index = run.nextIndex;
+          }
+        }
+      }
+      continue;
+    }
+
+    // Bare language line (e.g. "python" on its own line) → fence opener.
+    if (CODE_LANGUAGE_LINE.test(line.trim())) {
+      const language = line.trim().toLowerCase();
+      const next = nextNonBlankIndex(lines, index + 1);
+      if (next !== undefined && !CODE_LANGUAGE_LINE.test((lines[next] ?? "").trim())) {
+        const run = collectCodeRun(lines, next);
+        if (run.block.length) {
+          out.push("", `\`\`\`${language}`, ...run.block, "```", "");
+          index = run.nextIndex;
+          continue;
+        }
+      }
+    }
+
+    out.push(line);
+    index += 1;
+  }
+
+  return out.join("\n");
+}
+
+function nextNonBlankIndex(lines: string[], start: number) {
+  for (let index = start; index < lines.length; index += 1) {
+    if ((lines[index] ?? "").trim()) return index;
+  }
+  return undefined;
+}
+
+function collectCodeRun(lines: string[], start: number) {
+  const block: string[] = [];
+  let index = start;
+  while (index < lines.length && !isCodeRunEnd(lines[index] ?? "")) {
+    block.push(lines[index] ?? "");
+    index += 1;
+  }
+  while (block.length && block.at(-1)?.trim() === "") block.pop();
+  return { block, nextIndex: index };
+}
+
+function isCodeRunEnd(line: string) {
+  if (/^\s*(`{3,}|~{3,})/u.test(line)) return true;
+  if (/^#{2,3}\s+/u.test(line)) return true;
+  // Prose starts with a CJK character; single-# lines stay in the code block
+  // (they are Python comments).
+  if (/^[\u4e00-\u9fff]/u.test(line) && !/^\s*#/u.test(line)) return true;
+  return false;
+}
+
+function looksLikeProseBody(body: string) {
+  const trimmed = body.trim();
+  if (!trimmed) return false;
+  if (!/[\u4e00-\u9fff]/u.test(trimmed)) return false;
+  if (/^\s*(?:def|class|import|from|return)\b/mu.test(trimmed)) return false;
+  if (/^\s*(?:caption|prompt|diagramSpec|textLabelsAllowed)\s*:/imu.test(trimmed)) return false;
+  return true;
+}
+
 export async function markdownToTex(markdown: string, options: TexOptions = {}) {
   const rawBlocks: string[] = [];
-  const figureProtected = await replaceFiguresWithRawBlocks(markdown, rawBlocks, options);
+  const figureProtected = await replaceFiguresWithRawBlocks(normalizeExportFences(markdown), rawBlocks, options);
   const lines = figureProtected.split(/\r?\n/u);
   const out: string[] = [];
   let index = 0;
@@ -497,7 +606,12 @@ export async function markdownToTex(markdown: string, options: TexOptions = {}) 
     if (h3) {
       const heading = stripHeadingNumber(h3[1] ?? "");
       fixedListKind = fixedListKindForHeading(heading);
-      out.push(`\\subsubsection{${escapeMarkdownText(heading)}}`);
+      const split = splitOversizedHeading(heading);
+      if (split) {
+        out.push(`\\subsubsection{${escapeMarkdownText(split.title)}}`, "", escapeMarkdownText(split.body));
+      } else {
+        out.push(`\\subsubsection{${escapeMarkdownText(heading)}}`);
+      }
       index += 1;
       continue;
     }
@@ -505,7 +619,12 @@ export async function markdownToTex(markdown: string, options: TexOptions = {}) 
     if (h2) {
       const heading = stripHeadingNumber(h2[1] ?? "");
       fixedListKind = fixedListKindForHeading(heading);
-      out.push(`\\section{${escapeMarkdownText(heading)}}`);
+      const split = splitOversizedHeading(heading);
+      if (split) {
+        out.push(`\\section{${escapeMarkdownText(split.title)}}`, "", escapeMarkdownText(split.body));
+      } else {
+        out.push(`\\section{${escapeMarkdownText(heading)}}`);
+      }
       index += 1;
       continue;
     }
@@ -690,6 +809,22 @@ async function fixedSectionListToTex(
 
 function stripHeadingNumber(text: string) {
   return text.trim().replace(/^\d+(?:\.\d+)*\s*/u, "");
+}
+
+/**
+ * Writers occasionally fold a whole discussion paragraph into a heading
+ * ("## 讨论：…300 chars…"). Splitting it keeps the PDF from typesetting a
+ * paragraph as a bold section title.
+ */
+function splitOversizedHeading(heading: string) {
+  const trimmed = heading.trim();
+  if (trimmed.length <= 50) return undefined;
+  const match = trimmed.match(/^([^：:]{1,40})[：:]\s*([\s\S]+)$/u);
+  if (!match) return undefined;
+  const title = match[1]?.trim() ?? "";
+  const body = match[2]?.trim() ?? "";
+  if (!title || !body) return undefined;
+  return { title, body };
 }
 
 function tableToTex(tableLines: string[]) {
@@ -1026,7 +1161,11 @@ function escapeMarkdownText(value: string) {
   const bareMathProtected = protectBareLatexMath(protectedText, math);
   const escaped = escapeTex(bareMathProtected)
     .replace(/[ΑΒΓΔΘΛΞΠΣΦΨΩαβγδεζηθικλμνξπρστυφχψω]/gu, (char) => unicodeGreekTex(char))
-    .replace(/\*\*([^*]+)\*\*/gu, "\\textbf{$1}")
+    // Bold first: **...** may wrap nested *italics* (common in reading-list
+    // citations); the bold branch converts them recursively. Standalone
+    // italics need ≥3 chars so "a*b*c" multiplication is not read as emphasis.
+    .replace(/\*\*([\s\S]*?)\*\*/gu, (_match, inner: string) => `\\textbf{${inner.replace(/(?<!\*)\*([^*\n]{3,})\*(?!\*)/gu, "\\emph{$1}")}}`)
+    .replace(/(?<!\*)\*([^*\n]{3,})\*(?!\*)/gu, "\\emph{$1}")
     .replace(/`([^`]+)`/gu, "\\texttt{$1}");
   return escaped.replace(/@@MATH(\d+)@@/gu, (_match, index) => math[Number(index)] ?? "");
 }
