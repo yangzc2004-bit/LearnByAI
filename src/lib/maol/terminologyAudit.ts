@@ -9,15 +9,19 @@ import { ModelOverrides } from "../modelOverrides";
 
 /**
  * Whole-book terminology consistency audit (the "马尔科夫 vs 马尔可夫" class
- * of defect). Per-chapter extraction calls (REVIEWER slot) list only terms
- * with suspected multi-spelling usage; the results are aggregated across the
- * book, a canonical form is chosen deterministically (Course Bible convention
- * first, then the most frequent spelling), and the losing spellings are
- * replaced outside code fences, chapter by chapter.
+ * of defect).
  *
- * The deterministic replacement step keeps the audit safe: nothing is
- * rewritten by an LLM, only surface-form unification of the exact variant
- * tokens the extractor reported.
+ * Two-stage design, because asking an LLM to "find variant spellings" directly
+ * inside a 20k-char chapter is a rare-event task it reliably fails (returns an
+ * empty list). Instead:
+ *   1. Per chapter (easy): enumerate the Chinese terms that actually appear.
+ *   2. Deterministic seeds: near-duplicate pairs over the aggregated term list
+ *      (same length, one differing character — catches 马尔科夫/马尔可夫,
+ *      同策略/在策略) so real conflicts can never miss the judge.
+ *   3. One short book-level call (easy): judge which candidate pairs are truly
+ *      the same concept, and add any pairs it sees in the full term list.
+ *   4. Deterministic canonical choice (Course Bible convention first, then the
+ *      most frequent spelling) and fence-safe replacement, chapter by chapter.
  */
 
 export type TerminologyReplacement = { from: string; to: string };
@@ -37,16 +41,12 @@ export type TerminologyAuditReport = {
   error?: string;
 };
 
-type ChapterTermEntry = {
-  english?: string;
-  chinese?: string;
-  variants?: string[];
-};
-
 const AUDIT_CONCURRENCY = 2;
 const AUDIT_TIMEOUT_MS = 180_000;
+const MAX_TERMS_PER_CHAPTER = 80;
+const MAX_TERMS_PER_BOOK = 400;
 
-export function buildTerminologyAuditPrompt(
+export function buildTermExtractionPrompt(
   course: Course,
   chapterContent: string,
   chapterNumber: number,
@@ -56,27 +56,27 @@ export function buildTerminologyAuditPrompt(
     terminology: course.courseBible.terminology ?? [],
     writingConventions: course.courseBible.writingConventions ?? "",
   };
-  return `你是一名教材术语审计员。下面是一本中文教材其中一章的正文与 Course Bible 术语约定。
+  return `你是一名教材术语提取员。下面是一本中文教材第 ${chapterNumber} 章《${chapterTitle}》的正文。
 
-任务：只找出「疑似同一概念在中文里出现多种写法」的术语冲突，例如「马尔科夫」vs「马尔可夫」、「同策略」vs「在策略」。不要把中英对照（「策略梯度」与 policy gradient）算作冲突；只有同一语言内部存在两种以上写法时才列出。
+任务：逐段扫描正文，把其中出现的所有中文术语（专有名词、方法名、概念名，2 到 10 个字，可含英文缩写，如「Q 学习」「TD 误差」）逐一列出。这是机械的枚举任务，只列词本身，不要判断、不要解释。
 
-只输出合法 JSON，不要输出 Markdown 或解释。结构为：
-{"terms":[{"english":"英文原词（可选）","chinese":"本章最常见的写法","variants":["写法1","写法2"]}]}
+只输出合法 JSON，结构为：
+{"terms":["术语1","术语2"]}
 
 规则：
-- variants 只列出你在本章正文里真实看到的不同写法（必须包含 chinese 本身），禁止臆造。
-- 每个 variant 不超过 20 个字符；每个 term 的 variants 最多 4 个。
-- 没有可疑冲突就输出 {"terms":[]}。
+- 只列真实出现在正文中的词，禁止编造。
+- 按出现顺序列出，最多 ${MAX_TERMS_PER_CHAPTER} 个；重复出现的只列一次。
+- 术语表用于全书一致性检查，宁可多列不可漏列。
 - 只输出 JSON，第一个字符必须是 {，最后一个字符必须是 }。
 
-Course Bible 术语约定：
+Course Bible 术语约定（仅参考，不要照抄）：
 ${JSON.stringify(conventions)}
 
 第 ${chapterNumber} 章《${chapterTitle}》正文：
 ${chapterContent}`;
 }
 
-export function parseChapterTermVariants(raw: string): ChapterTermEntry[] {
+export function parseChapterTerms(raw: string): string[] {
   let parsed: { terms?: unknown };
   try {
     parsed = parseJson<{ terms?: unknown }>(raw);
@@ -84,48 +84,136 @@ export function parseChapterTermVariants(raw: string): ChapterTermEntry[] {
     return [];
   }
   if (!Array.isArray(parsed.terms)) return [];
-  const entries: ChapterTermEntry[] = [];
+  const seen = new Set<string>();
+  const terms: string[] = [];
   for (const entry of parsed.terms) {
+    if (typeof entry !== "string") continue;
+    const term = entry.trim().slice(0, 10);
+    if (term.length < 2 || seen.has(term)) continue;
+    seen.add(term);
+    terms.push(term);
+  }
+  return terms.slice(0, MAX_TERMS_PER_CHAPTER);
+}
+
+/**
+ * Deterministic near-duplicate seeds over the aggregated term list: same
+ * length with exactly one differing character, or sharing a 2+ char head/tail
+ * with a single-character difference elsewhere. Purely a candidate generator —
+ * the book-level judge decides whether the pair is truly the same concept
+ * (offline/online pairs like 离线策略/在线策略 are NOT).
+ */
+export function findNearDuplicatePairs(terms: string[]): { english?: string; variants: string[] }[] {
+  const normalized = [...new Set(terms.map((term) => term.trim()))].filter(
+    (term) => term.length >= 3 && term.length <= 8,
+  );
+  const pairs: { english?: string; variants: string[] }[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 0; i < normalized.length; i += 1) {
+    for (let j = i + 1; j < normalized.length; j += 1) {
+      const a = normalized[i]!;
+      const b = normalized[j]!;
+      if (a === b) continue;
+      const key = [a, b].sort().join("\u0000");
+      if (seen.has(key)) continue;
+      if (!isNearDuplicate(a, b)) continue;
+      seen.add(key);
+      pairs.push({ variants: [a, b] });
+    }
+  }
+  return pairs;
+}
+
+function isNearDuplicate(a: string, b: string) {
+  if (a.length !== b.length) return false;
+  let diffs = 0;
+  for (let k = 0; k < a.length; k += 1) {
+    if (a[k] !== b[k]) diffs += 1;
+  }
+  return diffs === 1;
+}
+
+export function buildConflictClassificationPrompt(
+  course: Course,
+  allTerms: string[],
+  candidatePairs: { english?: string; variants: string[] }[],
+) {
+  const termsText = allTerms.slice(0, MAX_TERMS_PER_BOOK).join("、");
+  const pairsText = candidatePairs
+    .slice(0, 60)
+    .map((pair, index) => `${index + 1}. ${pair.variants.join(" / ")}`)
+    .join("\n");
+  return `你是一名教材术语审计员。一本中文教材的全部术语已提取如下，其中一部分「疑似同义异形」的候选对也已列出。
+
+任务：找出「同一概念存在多种中文写法」的冲突组（例如「马尔科夫」与「马尔可夫」是同一概念 Markov 的两种写法；「同策略」与「在策略」都是 on-policy 的译名）。同义异形必须合并为一个冲突组；「离线策略」与「在线策略」这类反义或不同概念的对不要合并。
+
+只输出合法 JSON，结构为：
+{"conflicts":[{"english":"英文原词（可选）","variants":["写法1","写法2"]}]}
+
+规则：
+- 优先判断候选对；术语列表中还有候选对没覆盖的同义异形，也要输出。
+- variants 只使用术语列表或候选对里真实出现的写法，禁止发明新词。
+- 没有冲突就输出 {"conflicts":[]}。
+- 只输出 JSON，第一个字符必须是 {，最后一个字符必须是 }。
+
+候选对：
+${pairsText || "（无）"}
+
+全书术语列表：
+${termsText}`;
+}
+
+export function parseConflictGroups(raw: string): { key: string; english?: string; variants: string[] }[] {
+  let parsed: { conflicts?: unknown };
+  try {
+    parsed = parseJson<{ conflicts?: unknown }>(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed.conflicts)) return [];
+  const groups: { key: string; english?: string; variants: string[] }[] = [];
+  for (const entry of parsed.conflicts) {
     if (!entry || typeof entry !== "object") continue;
     const record = entry as Record<string, unknown>;
     const english = typeof record.english === "string" ? record.english.trim() : "";
-    const chinese = typeof record.chinese === "string" ? record.chinese.trim() : "";
     const variants = Array.isArray(record.variants)
       ? record.variants.filter((item): item is string => typeof item === "string")
           .map((item) => item.trim().slice(0, 20))
           .filter((item) => item.length >= 2)
       : [];
-    const merged = [...new Set([chinese, ...variants].filter(Boolean))].slice(0, 4);
-    if (merged.length < 2) continue;
-    entries.push({ english: english || undefined, chinese: merged[0], variants: merged });
+    const distinct = [...new Set(variants)];
+    if (distinct.length < 2) continue;
+    groups.push({
+      key: (english || distinct[0] || "").toLowerCase().replace(/\s+/gu, " "),
+      english: english || undefined,
+      variants: distinct,
+    });
   }
-  return entries;
+  return groups;
 }
 
-/** Group per-chapter variant lists into book-wide conflicts. */
-export function aggregateTermConflicts(
-  perChapter: { chapterIndex: number; entries: ChapterTermEntry[] }[],
+/** Map conflict groups into book-wide conflicts and locate their chapters. */
+export function buildConflictMap(
+  groups: { key: string; variants: string[] }[],
+  chapterContents: string[],
 ): Map<string, TerminologyConflict> {
   const conflicts = new Map<string, TerminologyConflict>();
-  for (const { chapterIndex, entries } of perChapter) {
-    for (const entry of entries) {
-      const key = (entry.english || entry.chinese || "").toLowerCase().replace(/\s+/gu, " ");
-      if (!key) continue;
-      const existing = conflicts.get(key);
-      if (existing) {
-        for (const variant of entry.variants ?? []) {
-          if (!existing.variants.includes(variant)) existing.variants.push(variant);
-        }
-        if (!existing.chapters.includes(chapterIndex)) existing.chapters.push(chapterIndex);
-      } else {
-        conflicts.set(key, {
-          key,
-          variants: [...(entry.variants ?? [])],
-          occurrences: 0,
-          chapters: [chapterIndex],
-        });
+  for (const group of groups) {
+    if (!group.key) continue;
+    const chapters: number[] = [];
+    for (let index = 0; index < chapterContents.length; index += 1) {
+      if (group.variants.some((variant) => occurrencesOutsideFences(chapterContents[index] ?? "", variant) > 0)) {
+        chapters.push(index + 1);
       }
     }
+    if (chapters.length === 0) continue;
+    conflicts.set(group.key, {
+      key: group.key,
+      variants: group.variants,
+      occurrences: 0,
+      chapters,
+    });
   }
   return conflicts;
 }
@@ -274,33 +362,49 @@ export async function runTerminologyAudit(
   }
 
   try {
+    // Stage 1: per-chapter term enumeration (an easy task the model does well).
     const perChapter = await runInBatches(chapters, AUDIT_CONCURRENCY, async (chapter) => {
       const content = chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
       const raw = await dispatchAgentText({
         agent: "REVIEWER",
-        prompt: buildTerminologyAuditPrompt(
+        prompt: buildTermExtractionPrompt(
           course,
           content,
           course.chapters.findIndex((item) => item.id === chapter.id) + 1,
           chapter.title,
         ),
         temperature: 0.1,
-        maxTokens: 2048,
+        maxTokens: 4096,
         timeoutMs: AUDIT_TIMEOUT_MS,
         maxAttempts: 1,
         responseFormat: "json_object",
         overrides: options.overrides,
         mock: () => JSON.stringify({ terms: [] }),
       });
-      const entries = parseChapterTermVariants(raw);
-      const chapterIndex = course.chapters.findIndex((item) => item.id === chapter.id);
-      return { chapterIndex, entries };
+      return parseChapterTerms(raw);
     });
 
-    const conflicts = aggregateTermConflicts(perChapter);
+    const allTerms = [...new Set(perChapter.flat())];
+    const candidatePairs = findNearDuplicatePairs(allTerms);
+
+    // Stage 2: one short book-level call judges the candidate pairs (easy).
+    const judgeRaw = await dispatchAgentText({
+      agent: "REVIEWER",
+      prompt: buildConflictClassificationPrompt(course, allTerms, candidatePairs),
+      temperature: 0.1,
+      maxTokens: 2048,
+      timeoutMs: AUDIT_TIMEOUT_MS,
+      maxAttempts: 1,
+      responseFormat: "json_object",
+      overrides: options.overrides,
+      mock: () => JSON.stringify({ conflicts: [] }),
+    });
+    const groups = parseConflictGroups(judgeRaw);
+
     const chapterContents = chapters.map(
       (chapter) => chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "",
     );
+    const conflicts = buildConflictMap(groups, chapterContents);
     countVariantOccurrences(chapterContents, conflicts);
     const { replacements, conflicts: resolved } = chooseCanonicalReplacements(
       conflicts,
