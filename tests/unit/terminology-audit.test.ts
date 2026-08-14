@@ -26,22 +26,28 @@ test("generateChapterCandidatePairs pairs a frequent gram with a rare one-char-d
   const flat = pairs.map((pair) => pair.variants.sort().join("/"));
   assert.ok(flat.includes("马尔可夫/马尔科夫"), JSON.stringify(flat));
   assert.ok(flat.includes("马尔可夫决策过程/马尔科夫决策过程"), JSON.stringify(flat));
-  // Ranked rare-side first: the 1-occurrence pairs come before balanced pairs.
-  const firstRare = pairs[0]?.rare ?? 99;
-  for (const pair of pairs.slice(0, 5)) {
-    assert.ok((pair.rare ?? 99) >= firstRare - 0, JSON.stringify(pairs.slice(0, 5)));
-  }
 });
 
-test("rankBookCandidates ranks rare-side-first across chapters", () => {
+test("generateChapterCandidatePairs boosts title-vs-body spelling splits", () => {
+  const content = "马尔可夫决策过程与马尔可夫性质。".repeat(4);
+  const pairs = generateChapterCandidatePairs(content, "马尔科夫决策过程");
+  const flat = pairs.map((pair) => pair.variants.sort().join("/"));
+  assert.ok(flat.includes("马尔可夫决策过程/马尔科夫决策过程"), JSON.stringify(flat));
+  assert.equal(pairs[0]?.title, true, JSON.stringify(pairs.slice(0, 3)));
+});
+
+test("rankBookCandidates ranks title conflicts and rare-side pairs first", () => {
+  const content = "同义甲 同义乙 ".repeat(20) + "马尔可夫决策过程 ".repeat(28) + "马尔科夫决策过程 " + "马尔可夫 ".repeat(64) + "马尔科夫";
   const ranked = rankBookCandidates(
     [
-      [{ variants: ["同义甲", "同义乙"], rare: 20, imbalance: 3, total: 43 }],
-      [{ variants: ["马尔可夫", "马尔科夫"], rare: 1, imbalance: 64, total: 65 }],
+      [{ variants: ["同义甲", "同义乙"], rare: 20, imbalance: 3, total: 43, title: false }],
+      [{ variants: ["马尔可夫", "马尔科夫"], rare: 1, imbalance: 64, total: 65, title: false }],
+      [{ variants: ["马尔可夫决策过程", "马尔科夫决策过程"], rare: 1, imbalance: 28, total: 29, title: true }],
     ],
-    ["同义甲 同义乙 ".repeat(20) + "马尔可夫 ".repeat(64) + "马尔科夫"],
+    [content],
   );
-  assert.deepEqual(ranked[0]?.variants, ["马尔可夫", "马尔科夫"], JSON.stringify(ranked));
+  assert.deepEqual(ranked[0]?.variants, ["马尔可夫决策过程", "马尔科夫决策过程"], JSON.stringify(ranked));
+  assert.deepEqual(ranked[1]?.variants, ["马尔可夫", "马尔科夫"], JSON.stringify(ranked));
 });
 
 test("excerptAround returns a short real context around the token", () => {

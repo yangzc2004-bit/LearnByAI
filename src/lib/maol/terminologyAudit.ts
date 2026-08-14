@@ -50,7 +50,7 @@ export type TerminologyAuditReport = {
 };
 
 const AUDIT_TIMEOUT_MS = 180_000;
-const MAX_JUDGE_PAIRS = 80;
+const MAX_JUDGE_PAIRS = 60;
 
 /**
  * Full CJK gram map (length 4-8, whole runs up to 16 chars so term counts
@@ -87,11 +87,16 @@ function isNearDuplicate(a: string, b: string) {
 /**
  * Candidate pairs within one chapter: every frequent gram (count ≥ 2) is
  * matched against ALL same-length grams (including count-1 ones), so a rare
- * spelling is never lost. Co-occurrence in the same chapter is guaranteed by
- * construction. Pairs are ranked rare-side-first so the judge's slots go to
- * the classic 1-vs-65 inconsistency, not balanced shard pairs.
+ * spelling is never lost. Chapter-title grams are matched against the body
+ * too and tagged — a title/body spelling split is the most visible conflict
+ * (马尔科夫决策过程 as a chapter title vs 马尔可夫 in the body). Pair rank:
+ * title matches first, then rare side ascending, then total frequency.
  */
-export function generateChapterCandidatePairs(content: string, maxPairs = 200): { variants: string[]; rare: number; imbalance: number; total: number }[] {
+export function generateChapterCandidatePairs(
+  content: string,
+  title?: string,
+  maxPairs = 300,
+): { variants: string[]; rare: number; imbalance: number; total: number; title: boolean }[] {
   const counts = extractCjkGrams(content);
   const frequent = [...counts.entries()]
     .filter(([, count]) => count >= 2)
@@ -103,44 +108,62 @@ export function generateChapterCandidatePairs(content: string, maxPairs = 200): 
     list.push(gram);
     byLength.set(gram.length, list);
   }
+  const titleGrams = title ? [...extractCjkGrams(title).keys()] : [];
 
-  const pairs = new Map<string, { variants: string[]; rare: number; imbalance: number; total: number }>();
+  const pairs = new Map<string, { variants: string[]; rare: number; imbalance: number; total: number; title: boolean }>();
+  const addPair = (a: string, aCount: number, b: string, bCount: number, title: boolean) => {
+    if (a === b || !isNearDuplicate(a, b)) return;
+    const rare = Math.min(aCount, bCount);
+    const imbalance = Math.abs(aCount - bCount);
+    const key = [a, b].sort().join("\u0000");
+    const existing = pairs.get(key);
+    if (!existing || title || rare < existing.rare || (rare === existing.rare && aCount + bCount > existing.total)) {
+      pairs.set(key, { variants: [a, b], rare, imbalance, total: aCount + bCount, title: title || existing?.title || false });
+    }
+  };
+
   for (const [frequentGram, frequentCount] of frequent) {
     for (const partner of byLength.get(frequentGram.length) ?? []) {
       if (partner === frequentGram) continue;
-      if (!isNearDuplicate(frequentGram, partner)) continue;
-      const partnerCount = counts.get(partner) ?? 1;
-      const rare = Math.min(frequentCount, partnerCount);
-      const imbalance = Math.abs(frequentCount - partnerCount);
-      const key = [frequentGram, partner].sort().join("\u0000");
-      const existing = pairs.get(key);
-      if (!existing || rare < existing.rare || (rare === existing.rare && imbalance < existing.imbalance)) {
-        pairs.set(key, { variants: [frequentGram, partner], rare, imbalance, total: frequentCount + partnerCount });
-      }
+      addPair(frequentGram, frequentCount, partner, counts.get(partner) ?? 1, false);
+    }
+  }
+  // Title grams against the body — the rare side here is almost always the
+  // interesting one (title says 马尔科夫, body says 马尔可夫).
+  for (const titleGram of titleGrams) {
+    for (const partner of byLength.get(titleGram.length) ?? []) {
+      if (partner === titleGram) continue;
+      addPair(titleGram, 1, partner, counts.get(partner) ?? 1, true);
     }
   }
 
   return [...pairs.values()]
-    .sort((a, b) => a.rare - b.rare || a.imbalance - b.imbalance || b.total - a.total)
+    .sort(
+      (a, b) =>
+        Number(b.title) - Number(a.title) ||
+        a.rare - b.rare ||
+        b.total - a.total ||
+        a.imbalance - b.imbalance,
+    )
     .slice(0, maxPairs);
 }
 
 /**
  * Merge per-chapter candidate pairs into one book-level ranked list for the
- * judge: rare-side count ascending first (the signature of a real
- * inconsistency), then imbalance ascending, then total frequency.
+ * judge: title conflicts first, then rare-side count ascending (the 1-vs-65
+ * signature), then total frequency descending.
  */
 export function rankBookCandidates(
-  chapterPairs: { variants: string[]; rare: number; imbalance: number; total: number }[][],
+  chapterPairs: { variants: string[]; rare: number; imbalance: number; total: number; title: boolean }[][],
   chapterContents: string[],
-  maxPairs = 80,
+  maxPairs = 60,
 ) {
-  const merged = new Map<string, { variants: string[]; rare: number; imbalance: number; total: number }>();
+  const merged = new Map<string, { variants: string[]; rare: number; imbalance: number; total: number; title: boolean }>();
   for (const pairs of chapterPairs) {
     for (const pair of pairs) {
       const key = pair.variants.sort().join("\u0000");
       const existing = merged.get(key);
-      if (!existing || pair.rare < existing.rare || (pair.rare === existing.rare && pair.imbalance < existing.imbalance)) {
+      if (!existing || pair.title || pair.rare < existing.rare || (pair.rare === existing.rare && pair.total > existing.total)) {
         merged.set(key, pair);
       }
     }
@@ -155,10 +178,17 @@ export function rankBookCandidates(
         rare: Math.min(counts[0] ?? 0, counts[1] ?? 0),
         imbalance: Math.abs((counts[0] ?? 0) - (counts[1] ?? 0)),
         total: (counts[0] ?? 0) + (counts[1] ?? 0),
+        title: pair.title,
       };
     })
     .filter((pair) => pair.total > 0)
-    .sort((a, b) => a.rare - b.rare || a.imbalance - b.imbalance || b.total - a.total)
+    .sort(
+      (a, b) =>
+        Number(b.title) - Number(a.title) ||
+        a.rare - b.rare ||
+        b.total - a.total ||
+        a.imbalance - b.imbalance,
+    )
     .slice(0, maxPairs)
     .map((pair) => ({ variants: pair.variants }));
 }
@@ -207,6 +237,7 @@ export function buildConflictJudgementPrompt(
 - 反义词、相反操作、不同概念、不同算法必须判 same:false，例如「硬更新」与「软更新」、「旧策略」与「新策略」、「模仿学习」与「模型学习」、「正态分布」与「状态分布」、「泛化误差」与「优化误差」。
 - 纯英文缩写对（如 GRPO 与 TRPO）一律 same:false。
 - 不确定就判 same:false（宁漏勿错）。
+- reason 必须不超过 15 个汉字；只输出 groups，不要输出任何解释或额外字段。
 - 只输出 JSON，第一个字符必须是 {，最后一个字符必须是 }。
 
 候选对与上下文：
@@ -459,10 +490,13 @@ export async function runTerminologyAudit(
     );
 
     // Stage 1 (deterministic, free): per-chapter gram pairing — every frequent
-    // gram matched against ALL same-length grams (rare spellings included) —
-    // then a book-level rank that puts the rare-side-first inconsistencies
-    // (the 1-vs-65 signature) at the top of the judge's list.
-    const chapterPairs = chapterContents.map((content) => generateChapterCandidatePairs(content));
+    // gram matched against ALL same-length grams (rare spellings included),
+    // chapter titles matched against the body and ranked first — then a
+    // book-level rank that puts the rare-side-first inconsistencies (the
+    // 1-vs-65 signature) at the top of the judge's list.
+    const chapterPairs = chapterContents.map((content, index) =>
+      generateChapterCandidatePairs(content, chapters[index]?.title),
+    );
     const candidates = rankBookCandidates(chapterPairs, chapterContents);
 
     // Stage 2 (one LLM call): evidence-backed judge over the ranked pairs.
@@ -470,7 +504,7 @@ export async function runTerminologyAudit(
       agent: "REVIEWER",
       prompt: buildConflictJudgementPrompt(candidates, chapterContents),
       temperature: 0.1,
-      maxTokens: 2048,
+      maxTokens: 4096,
       timeoutMs: AUDIT_TIMEOUT_MS,
       maxAttempts: 1,
       responseFormat: "json_object",
