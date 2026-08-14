@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { claimGenerationJob, deleteGenerationJobsForCourse, patchGenerationJob, releaseGenerationJob, upsertGenerationJob } from "./jobs";
 import { publishCourseChanged, publishGenerationJobChanged } from "./courseEvents";
 import { getChapterBody, hashChapterContent } from "./chapterContent";
-import { Annotation, Chapter, CompanionGuide, Course, ExerciseAnswer, ExportJob, GenerationJob, LectureProgress, QualityReport, Revision, UsageEvent } from "./types";
+import { Annotation, Chapter, CompanionGuide, CompanionProgress, Course, ExerciseAnswer, ExportJob, GenerationJob, LectureProgress, QualityReport, Revision, UsageEvent } from "./types";
 import { normalizeCourse } from "./normalizeCourse";
 import { createSupabaseServiceClient, resolveUserId } from "./supabase/server";
 
@@ -34,7 +34,8 @@ type LocalStore = {
   generationJobs: GenerationJob[];
   qualityReports: QualityReport[];
   usageEvents: UsageEvent[];
-  lectureProgress: LectureProgress[];
+  lectureProgress?: LectureProgress[];
+  companionProgress?: CompanionProgress[];
 };
 
 type SupabaseErrorLike = {
@@ -1598,10 +1599,13 @@ export async function listServerUsageEvents(request?: Request, action?: UsageEve
 }
 
 /**
- * Upsert per-user lecture progress for one chapter. Supabase keys on the
- * (user_id, chapter_id) unique constraint; the local fallback keys on id.
+/**
+ * Upsert per-user companion-guide progress for one chapter. Supabase keys
+ * on the (user_id, chapter_id) unique constraint of
+ * chapter_companion_progress — an atomic upsert, not the legacy
+ * select-then-insert pair. The local fallback keys on id.
  */
-export async function saveServerLectureProgress(progress: LectureProgress, request?: Request) {
+export async function saveServerLectureProgress(progress: CompanionProgress, request?: Request) {
   const userId = await resolveUserId(request);
   const next = {
     ...progress,
@@ -1616,31 +1620,9 @@ export async function saveServerLectureProgress(progress: LectureProgress, reque
     return next;
   }
 
-  const { data: existing, error: existingError } = await supabase
-    .from("chapter_lecture_progress")
-    .select("id")
-    .eq("user_id", userId)
-    .eq("chapter_id", next.chapterId)
-    .maybeSingle();
-  assertSupabaseNoError("Read lecture progress", existingError);
-
-  if (existing?.id) {
-    await requireSupabaseWrite(
-      "Persist lecture progress",
-      () => supabase.from("chapter_lecture_progress").update({
-        completed: next.completed,
-        quiz_score: next.quizScore ?? null,
-        quiz_total: next.quizTotal ?? null,
-        payload: next,
-        updated_at: next.updatedAt,
-      }).eq("id", existing.id),
-    );
-    return next;
-  }
-
   await requireSupabaseWrite(
-    "Insert lecture progress",
-    () => supabase.from("chapter_lecture_progress").insert({
+    "Upsert companion progress",
+    () => supabase.from("chapter_companion_progress").upsert({
       id: next.id,
       user_id: userId,
       course_id: next.courseId,
@@ -1650,24 +1632,34 @@ export async function saveServerLectureProgress(progress: LectureProgress, reque
       quiz_total: next.quizTotal ?? null,
       payload: next,
       updated_at: next.updatedAt,
-    }),
+    }, { onConflict: "user_id,chapter_id" }),
   );
   return next;
 }
-
 export async function getServerLectureProgress(chapterId: string, request?: Request) {
   const userId = await resolveUserId(request);
   const supabase = createSupabaseServiceClient();
 
   if (supabase && isUuid(userId)) {
-    const { data, error } = await supabase
+    // 新表优先：先读 chapter_companion_progress。
+    const { data: current, error: currentError } = await supabase
+      .from("chapter_companion_progress")
+      .select("payload")
+      .eq("user_id", userId)
+      .eq("chapter_id", chapterId)
+      .maybeSingle();
+    assertSupabaseNoError("Read companion progress", currentError);
+    if (current?.payload) return current.payload as CompanionProgress;
+
+    // 旧表兜底：迁移前写入的行仍可读一个发布周期。
+    const { data: legacy, error: legacyError } = await supabase
       .from("chapter_lecture_progress")
       .select("payload")
       .eq("user_id", userId)
       .eq("chapter_id", chapterId)
       .maybeSingle();
-    assertSupabaseNoError("Read lecture progress", error);
-    return data?.payload ? (data.payload as LectureProgress) : undefined;
+    assertSupabaseNoError("Read legacy lecture progress", legacyError);
+    return legacy?.payload ? (legacy.payload as CompanionProgress) : undefined;
   }
 
   await hydrateLocalStore();
@@ -1677,20 +1669,38 @@ export async function getServerLectureProgress(chapterId: string, request?: Requ
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   return matches[0];
 }
-
 export async function listServerLectureProgressForCourse(courseId: string, request?: Request) {
   const userId = await resolveUserId(request);
   const supabase = createSupabaseServiceClient();
 
   if (supabase && isUuid(userId)) {
-    const { data, error } = await supabase
+    const { data: current, error: currentError } = await supabase
+      .from("chapter_companion_progress")
+      .select("payload")
+      .eq("user_id", userId)
+      .eq("course_id", courseId)
+      .order("updated_at", { ascending: false });
+    assertSupabaseNoError("List companion progress", currentError);
+
+    // 旧表兜底读取：按 id 合并，新表行优先。
+    const { data: legacy, error: legacyError } = await supabase
       .from("chapter_lecture_progress")
       .select("payload")
       .eq("user_id", userId)
       .eq("course_id", courseId)
       .order("updated_at", { ascending: false });
-    assertSupabaseNoError("List lecture progress", error);
-    return (data ?? []).map((row) => row.payload as LectureProgress);
+    assertSupabaseNoError("List legacy lecture progress", legacyError);
+
+    const byId = new Map<string, CompanionProgress>();
+    for (const row of legacy ?? []) {
+      const progress = row.payload as CompanionProgress;
+      if (!byId.has(progress.id)) byId.set(progress.id, progress);
+    }
+    for (const row of current ?? []) {
+      const progress = row.payload as CompanionProgress;
+      byId.set(progress.id, progress);
+    }
+    return [...byId.values()].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   }
 
   await hydrateLocalStore();
@@ -1735,7 +1745,7 @@ function snapshotLocalStore(): LocalStore {
     generationJobs: [...localGenerationJobs.values()],
     qualityReports: [...localQualityReports.values()],
     usageEvents: [...localUsageEvents],
-    lectureProgress: [...localLectureProgress.values()],
+    companionProgress: [...localLectureProgress.values()],
   };
 }
 
@@ -1779,7 +1789,7 @@ function mergeLocalStoreIntoMemory(store: LocalStore) {
     store.usageEvents.forEach((event) => eventsById.set(event.id, event));
     localUsageEvents.splice(0, localUsageEvents.length, ...eventsById.values());
   }
-  store.lectureProgress?.forEach((progress) => {
+  (store.companionProgress ?? store.lectureProgress)?.forEach((progress) => {
     const existing = localLectureProgress.get(progress.id);
     localLectureProgress.set(progress.id, chooseByUpdatedAt(existing, progress));
   });

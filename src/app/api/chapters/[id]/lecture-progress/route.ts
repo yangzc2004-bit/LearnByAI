@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { requireApiUser } from "@/lib/apiAuth";
 import { getServerCourse, getServerLectureProgress, saveServerLectureProgress } from "@/lib/serverStore";
-import { LectureProgress } from "@/lib/types";
+import { CompanionProgress } from "@/lib/types";
+import { safeErrorMessage } from "@/lib/safeError";
 
 /**
  * Per-chapter lecture (讲义) learning progress: completion checkmark + latest
@@ -50,15 +51,36 @@ export async function POST(
     return NextResponse.json({ error: "Course or chapter not found" }, { status: 404 });
   }
 
+  const chapter = course.chapters.find((item) => item.id === id);
+  const questionCount = (chapter?.companionGuide?.finalQuiz ?? chapter?.lecture?.finalQuiz ?? []).length;
+
   const existing = await getServerLectureProgress(id, request);
   const quizScore = normalizeScore(body.quizScore);
   const quizTotal = normalizeScore(body.quizTotal);
+  const effectiveTotal = quizTotal ?? existing?.quizTotal;
+
+  // 越界/一致性校验（伴学计划 P0）：分数不能超过题数，题数必须等于当前小测题数。
+  if (quizScore !== undefined || quizTotal !== undefined) {
+    if (questionCount === 0) {
+      return NextResponse.json({ error: "当前章节还没有小测，无法提交成绩。" }, { status: 400 });
+    }
+    if (effectiveTotal === undefined) {
+      return NextResponse.json({ error: "缺少 quizTotal，无法校验成绩。" }, { status: 400 });
+    }
+    if (quizTotal !== undefined && quizTotal !== questionCount) {
+      return NextResponse.json({ error: `quizTotal 必须等于当前小测题数（${questionCount}）。` }, { status: 400 });
+    }
+    if (quizScore !== undefined && quizScore > effectiveTotal) {
+      return NextResponse.json({ error: "quizScore 不能大于 quizTotal。" }, { status: 400 });
+    }
+  }
+
   const bestScore = Math.max(
     existing?.bestScore ?? 0,
     quizScore ?? 0,
   );
 
-  const progress: LectureProgress = {
+  const progress: CompanionProgress = {
     id: existing?.id ?? crypto.randomUUID(),
     userId: auth.userId,
     courseId: body.courseId,
@@ -70,8 +92,13 @@ export async function POST(
     updatedAt: new Date().toISOString(),
   };
 
-  const saved = await saveServerLectureProgress(progress, request);
-  return NextResponse.json({ progress: saved });
+  try {
+    const saved = await saveServerLectureProgress(progress, request);
+    return NextResponse.json({ progress: saved });
+  } catch (error) {
+    // 保存失败必须显式返回错误，前端据此恢复按钮并允许重试。
+    return NextResponse.json({ error: safeErrorMessage(error, "学习进度保存失败，请重试。") }, { status: 500 });
+  }
 }
 
 function normalizeScore(value: unknown): number | undefined {

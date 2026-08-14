@@ -141,6 +141,29 @@ create table if not exists chapter_lecture_progress (
   constraint chapter_lecture_progress_user_chapter_key unique (user_id, chapter_id)
 );
 
+-- Companion-guide progress (AI 伴学指南): new canonical table. The legacy
+-- chapter_lecture_progress table is kept for one release cycle; reads prefer
+-- this table and fall back to the legacy one.
+create table if not exists chapter_companion_progress (
+  id uuid primary key,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  course_id uuid not null references courses(id) on delete cascade,
+  chapter_id uuid not null references chapters(id) on delete cascade,
+  completed boolean not null default false,
+  quiz_score integer,
+  quiz_total integer,
+  payload jsonb not null,
+  updated_at timestamptz not null default now(),
+  constraint chapter_companion_progress_user_chapter_key unique (user_id, chapter_id)
+);
+
+-- One-time backfill: carry every legacy progress row into the new table.
+-- Idempotent (on conflict do nothing), safe to run on every schema apply.
+insert into chapter_companion_progress (id, user_id, course_id, chapter_id, completed, quiz_score, quiz_total, payload, updated_at)
+select id, user_id, course_id, chapter_id, completed, quiz_score, quiz_total, payload, updated_at
+from chapter_lecture_progress
+on conflict (user_id, chapter_id) do nothing;
+
 create table if not exists quota_reservations (
   id uuid primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -178,6 +201,7 @@ alter table quality_reports enable row level security;
 alter table exports enable row level security;
 alter table usage_events enable row level security;
 alter table chapter_lecture_progress enable row level security;
+alter table chapter_companion_progress enable row level security;
 alter table quota_reservations enable row level security;
 alter table app_settings enable row level security;
 alter table admin_audit_logs enable row level security;
@@ -210,6 +234,8 @@ drop policy if exists "Users can read own usage" on usage_events;
 create policy "Users can read own usage" on usage_events for select using (auth.uid() = user_id);
 drop policy if exists "Users can read own lecture progress" on chapter_lecture_progress;
 create policy "Users can read own lecture progress" on chapter_lecture_progress for select using (auth.uid() = user_id);
+drop policy if exists "Users can read own companion progress" on chapter_companion_progress;
+create policy "Users can read own companion progress" on chapter_companion_progress for select using (auth.uid() = user_id);
 drop policy if exists "Users can read own quota reservations" on quota_reservations;
 create policy "Users can read own quota reservations" on quota_reservations for select using (auth.uid() = user_id);
 
@@ -425,7 +451,7 @@ returns text
 language sql
 stable
 as $$
-  select 'learnbyai-beta-2026-06-22-01'::text;
+  select 'learnbyai-beta-2026-06-23-01'::text;
 $$;
 
 revoke execute on function public.claim_generation_job(uuid, text, integer, integer, integer) from public, anon, authenticated;
@@ -478,6 +504,12 @@ create index if not exists chapter_lecture_progress_user_course_idx
 
 create index if not exists chapter_lecture_progress_chapter_idx
   on chapter_lecture_progress (chapter_id, updated_at desc);
+
+create index if not exists chapter_companion_progress_user_course_idx
+  on chapter_companion_progress (user_id, course_id);
+
+create index if not exists chapter_companion_progress_chapter_idx
+  on chapter_companion_progress (chapter_id, updated_at desc);
 
 create index if not exists quota_reservations_user_action_expires_idx
   on quota_reservations (user_id, action, expires_at);

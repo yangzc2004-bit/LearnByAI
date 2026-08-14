@@ -34,6 +34,7 @@ export function LectureView({
   const [quizAnswers, setQuizAnswers] = useState<Record<number, number>>({});
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [localProgress, setLocalProgress] = useState(progress);
   const [latestScore, setLatestScore] = useState<{ score: number; total: number } | undefined>(
     progress?.quizScore !== undefined && progress?.quizTotal !== undefined
@@ -68,6 +69,7 @@ export function LectureView({
     if (quiz.length === 0 || submitted) return;
     setSubmitted(true);
     setSaving(true);
+    setSaveError(null);
     const total = quiz.length;
     try {
       await onSaveProgress(score, total);
@@ -85,14 +87,20 @@ export function LectureView({
         bestScore: Math.max(current?.bestScore ?? 0, score),
         updatedAt: new Date().toISOString(),
       }));
+    } catch (error) {
+      // 保存失败：恢复提交按钮、显示错误并允许直接重试。
+      setSubmitted(false);
+      setSaveError(error instanceof Error && error.message ? error.message : "小测成绩保存失败，请重试。");
     } finally {
       setSaving(false);
     }
+  }
   }
 
   function resetQuiz() {
     setSubmitted(false);
     setQuizAnswers({});
+    setSaveError(null);
   }
 
   return (
@@ -293,16 +301,20 @@ export function LectureView({
               )}
             </div>
           ) : (
-            <button
-              type="button"
-              onClick={() => void submitQuiz()}
-              disabled={quiz.some((_, index) => quizAnswers[index] === undefined)}
-              className="mt-6 rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              提交小测
-            </button>
+            <div className="mt-6">
+              {saveError && (
+                <p className="mb-3 text-xs text-destructive">{saveError}</p>
+              )}
+              <button
+                type="button"
+                onClick={() => void submitQuiz()}
+                disabled={quiz.some((_, index) => quizAnswers[index] === undefined)}
+                className="rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                提交小测
+              </button>
+            </div>
           )}
-        </section>
       )}
     </div>
   );

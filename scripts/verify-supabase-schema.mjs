@@ -4,7 +4,7 @@ import { join } from "node:path";
 const schemaPath = join(process.cwd(), "supabase", "schema.sql");
 const rawSql = readFileSync(schemaPath, "utf8");
 const compactSql = rawSql.toLowerCase().replace(/\s+/gu, " ");
-const expectedSchemaVersion = "learnbyai-beta-2026-06-22-01";
+const expectedSchemaVersion = "learnbyai-beta-2026-06-23-01";
 
 const tables = [
   "profiles",
@@ -20,6 +20,7 @@ const tables = [
   "usage_events",
   "quota_reservations",
   "chapter_lecture_progress",
+  "chapter_companion_progress",
 ];
 
 for (const table of tables) {
@@ -47,6 +48,7 @@ const requiredSnippets = [
   'create policy "users can read own usage"',
   'create policy "users can read own quota reservations"',
   'create policy "users can read own lecture progress"',
+  'create policy "users can read own companion progress"',
   "storage_path text",
   "storage_provider text",
   "locked_by text",

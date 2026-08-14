@@ -10,6 +10,7 @@
     "test:unit": "tsx --conditions=react-server --test tests/unit/**/*.test.ts tests/unit/**/*.test.mjs",
     "test:schema": "node scripts/verify-supabase-schema.mjs",
     "test:beta-ready": "node scripts/beta-readiness.mjs",
+    "verify:companion-progress": "node scripts/verify-companion-progress-migration.mjs",
     "test:supabase-smoke": "node scripts/supabase-smoke.mjs",
     "test:beta-health": "node scripts/beta-health.mjs",
     "test:worker-handoff": "node scripts/worker-handoff-smoke.mjs",
