@@ -31,6 +31,23 @@ function textbookSkeletonRules(input: CoursePlannerInput) {
 - （教材模式）中间每一章的 description 必须概括出 4 到 7 个可独立成小节的主题，purpose 写明本章在全书结构中的位置。`;
 }
 
+/** 讲义模式的规划规则：主题性「导论 / 复习」首尾章 + 明显更短的篇幅定位。 */
+function lectureSkeletonRules(input: CoursePlannerInput) {
+  if (input.contentMode !== "lecture") return "";
+  return `
+- （讲义模式）第一章是主题性「导论」章，depth 取 "light"：建立整体图景与学习路线，不讲授新知识点；标题须贴合课程主题自然命名，不要照抄「引言」；它占用目标章节数的第一个名额。
+- （讲义模式）中间每一章的 description 概括本章要讲清的核心内容，不要求枚举固定数量的小节主题（讲义不设固定小节数），purpose 写明本章在整条学习路线中的位置。
+- （讲义模式）讲义整体篇幅短于教材：同一 depth 权重下，讲义章的文字量明显更短、小节更少，不要按教材篇幅规划。`;
+}
+
+/** 首尾章节框架规则：教材钉死「引言 / 总结与展望」，讲义用主题性「导论 / 复习」，二者互斥。 */
+function skeletonFramingRule(input: CoursePlannerInput) {
+  if (input.contentMode === "lecture") {
+    return `- 最后一章是主题性「复习」收尾章，depth 取 "light"：回顾全书主线、串联各章脉络、指出前沿与后续学习方向，不引入新知识点；标题须贴合课程主题自然命名，不要照抄「总结与展望」；它占用目标章节数的最后一个名额，不额外增加章数。${lectureSkeletonRules(input)}`;
+  }
+  return `- 最后一章必须是全书收尾「总结与展望」章，depth 取 "light"：回顾全书主线、串联各章脉络、指出前沿与后续学习方向，不引入新知识点；它占用目标章节数的最后一个名额，不额外增加章数。${textbookSkeletonRules(input)}`;
+}
+
 /** 讲解风格 + 学习方式 的组合引导（替换原先裸 preference 文本）。 */
 function teachingGuidance(input: CoursePlannerInput) {
   return buildTeachingGuidance(input.styles, input.learningMode, input.preference);
@@ -124,7 +141,7 @@ ${formatInputMaterialSections(input)}
 - ${chapterCountRule(input.chapterCount)}
 - ${DEPTH_RULE}
 - discipline 取值只能是 "algorithm-engineering"（算法/工程：以可运行代码为核心交付物）、"theory-math"（理论/数学：以完整推导链条为核心）、"data-science"（数据科学：以数据处理流程与实验为核心）、"humanities"（人文社科）、"general"（通用）之一，按本课程的实际学科类型选择。
-- 最后一章必须是全书收尾「总结与展望」章，depth 取 "light"：回顾全书主线、串联各章脉络、指出前沿与后续学习方向，不引入新知识点；它占用目标章节数的最后一个名额，不额外增加章数。${textbookSkeletonRules(input)}
+${skeletonFramingRule(input)}
 - 学习方式约束：${LEARNING_MODE_STRUCTURE_RULE[input.learningMode]}
 - 规划深浅与口吻须符合上述难度基调。
 - 每个字符串不超过 80 个中文字符。
@@ -289,6 +306,8 @@ ${JSON.stringify(chapter)}
 - 若当前章是一个分部的收尾章，summaryForNext 必须包含“已有理论为何不足、下一分部为什么需要新工具”；若当前章是分部开篇，requiredTopics 第一项应承担导论性桥接，而不是直接堆新概念。
 - ${input.contentMode === "textbook"
     ? "requiredTopics 是本章的小节大纲：4 到 7 项，每项是一个可独立成节的主题（如「策略迭代的收敛性」），按讲授顺序排列；其余数组最多 4 项。每个字符串不超过 70 个中文字符。"
+    : input.contentMode === "lecture"
+    ? "requiredTopics 是本章要讲清的核心讲解点：2 到 4 项，每项是一个可独立讲解的主题，按讲授顺序排列（讲义不设固定小节数）；其余数组最多 4 项。每个字符串不超过 70 个中文字符。"
     : "每个数组最多 4 项，每个字符串不超过 70 个中文字符。"}
 - 联网摘要中与本章相关的近期论文必须进入 requiredTopics；年份信息写在主题描述文字里，requiredTopics 条目本身不得以「（2024）」等年份括号结尾。
 - 预印本、录用和正式发表状态不得混淆，不得虚构来源。

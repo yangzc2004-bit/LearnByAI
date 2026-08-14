@@ -1,6 +1,7 @@
 import { expectedChapterHeading } from "@/lib/chapterHeadings";
 import { Chapter, ChapterDepthWeight, Course } from "@/lib/types";
 import { textbookSkill } from "./textbookSkill";
+import { getLectureDepthGuide, lectureSkill } from "./lectureSkill";
 import { buildTeachingGuidance } from "./styleGuidance";
 
 type ChapterDepthGuide = {
@@ -73,6 +74,39 @@ export function getChapterDepthGuide(weight: ChapterDepthWeight | undefined): Ch
   return DEPTH_GUIDE[weight ?? "normal"];
 }
 
+function depthBlock(isLecture: boolean, depthWeight: ChapterDepthWeight | undefined): string {
+  if (isLecture) {
+    const guide = getLectureDepthGuide(depthWeight);
+    return `篇幅定位：${guide.label}
+本章正文必须覆盖以下内容要点：
+${guide.scope.map((item) => `- ${item}`).join("\n")}
+小节数量：不设固定数量，小节数由本章讲解需要自然决定，宁少勿多。
+讲解深度标准（用“讲透到什么程度”来决定篇幅——篇幅应当是讲深讲透的自然结果）：${guide.depthNote}
+篇幅软参考（仅指正文讲解文字，不含代码、块公式、练习；这是合理区间不是硬指标，讲透为先，不要为凑数注水或删减）：${guide.proseBand}`;
+  }
+  const guide = getChapterDepthGuide(depthWeight);
+  return `篇幅定位：${guide.label}
+本章正文必须覆盖以下内容要点：
+${guide.scope.map((item) => `- ${item}`).join("\n")}
+小节数量：${guide.sections}
+讲解深度标准（用“讲透到什么程度”来决定篇幅——篇幅应当是讲深讲透的自然结果）：${guide.depthNote}
+篇幅软参考（仅指正文讲解文字，不含代码、块公式、练习、拓展；这是合理区间不是硬指标，讲透为先，不要为凑数注水或删减）：${guide.proseBand}`;
+}
+
+function structureRules(isLecture: boolean): string {
+  if (isLecture) {
+    return `- 章节结构固定为讲义五段体例：问题导入 → 核心讲解 → 典型例子 → 要点整理 → 练习。核心讲解用主题小节承载，小节数不设固定数量，由讲解需要自然决定。
+- 「## 问题导入」用 2 到 4 段引出一个具体问题或场景，说明为什么要学本章；「## 核心讲解」把关键概念讲清楚（直觉先行，再给必要的定义与公式）；「## 典型例子」给 1 到 2 个从问题走到结论的例子；「## 要点整理」用 3 到 5 条要点回顾本章；「## 练习」给 2 到 4 道由浅入深的练习题，其中可包含 1 个开放任务。
+- 讲义体例不要求教材式段落：不要堆砌「定义 / 定理 / 证明 / 完整推导 / 章节小结 / 拓展阅读」；推导点到为止，完整证明与拓展阅读不是必选项。`;
+  }
+  return `- 章节结构固定为：正文主题小节（按上面的内容要点展开）→「## 本章小结」→「## 练习」→「## 拓展阅读」。
+- 「## 练习」给 3 到 5 道由浅入深的练习题，其中包含 1 个开放式项目任务；「## 拓展阅读」给 2 到 4 条延伸方向或资源（若确无可靠来源可省略该节）。
+- 上面的正文篇幅护栏只针对正文主题小节，不包含「## 练习」与「## 拓展阅读」；这两块是固定附加块，不随本章篇幅定位缩放。
+- 禁用机械模板标题，例如“知识单元”“为什么需要它”“直觉解释”“检查理解的小题”。
+- “例”和“定义”必须使用普通教材段落，不得使用 Markdown 引用块。格式固定为「加粗的例 N.M：标题」或「加粗的定义 N.M：标题」，随后空一行写普通正文、表格和公式；不要使用 >、底色、左侧竖线或斜体来包裹它们。
+- 正文中至少包含 1 个贯穿讲解的实践案例；只有当本章契约允许代码实现细节时才写代码，否则用“概念性诊断/手算/表格比较”案例替代代码。`;
+}
+
 /**
  * Textbook mode: the confirmed book outline (book title + this chapter's
  * section outline) is authoritative context beyond the per-chapter contract.
@@ -125,34 +159,24 @@ export function buildChapterWriterPrompt(
   const next = chapterIndex >= 0 ? chapters[chapterIndex + 1] : undefined;
   const chapterNumber = chapterIndex >= 0 ? chapterIndex + 1 : undefined;
   const requiredHeading = expectedChapterHeading(course, chapter);
-  const depthGuide = getChapterDepthGuide(chapter.depthWeight);
+  const isLecture = course.contentMode === "lecture";
   const contract = chapter.contract ?? course.courseBible.chapterContracts?.find((item) => item.chapterTitle === chapter.title);
 
-  return `${textbookSkill()}
+  return `${isLecture ? lectureSkill() : textbookSkill()}
 
 # Task: Chapter Writing
 
-你正在撰写一章中文研究生教材。请只输出完整 Markdown 正文，不要输出 JSON、审稿过程、解释前缀或代码围栏包裹全文。
+你正在撰写一章${isLecture ? "中文电子讲义" : "中文研究生教材"}。请只输出完整 Markdown 正文，不要输出 JSON、审稿过程、解释前缀或代码围栏包裹全文。
 
 当前章节：第 ${chapterNumber ?? "未知"} 章 / 共 ${chapters.length} 章
 第一行必须严格等于：
 # ${requiredHeading}
 
-篇幅定位：${depthGuide.label}
-本章正文必须覆盖以下内容要点：
-${depthGuide.scope.map((item) => `- ${item}`).join("\n")}
-小节数量：${depthGuide.sections}
-讲解深度标准（用“讲透到什么程度”来决定篇幅——篇幅应当是讲深讲透的自然结果）：${depthGuide.depthNote}
-篇幅软参考（仅指正文讲解文字，不含代码、块公式、练习、拓展；这是合理区间不是硬指标，讲透为先，不要为凑数注水或删减）：${depthGuide.proseBand}
+${depthBlock(isLecture, chapter.depthWeight)}
 
 硬性要求：
 - 不得发明、改写或错置章节编号；正文中不要出现与当前章节冲突的“第 N 章”标题。
-- 章节结构固定为：正文主题小节（按上面的内容要点展开）→「## 本章小结」→「## 练习」→「## 拓展阅读」。
-- 「## 练习」给 3 到 5 道由浅入深的练习题，其中包含 1 个开放式项目任务；「## 拓展阅读」给 2 到 4 条延伸方向或资源（若确无可靠来源可省略该节）。
-- 上面的正文篇幅护栏只针对正文主题小节，不包含「## 练习」与「## 拓展阅读」；这两块是固定附加块，不随本章篇幅定位缩放。
-- 禁用机械模板标题，例如“知识单元”“为什么需要它”“直觉解释”“检查理解的小题”。
-- “例”和“定义”必须使用普通教材段落，不得使用 Markdown 引用块。格式固定为「加粗的例 N.M：标题」或「加粗的定义 N.M：标题」，随后空一行写普通正文、表格和公式；不要使用 >、底色、左侧竖线或斜体来包裹它们。
-- 正文中至少包含 1 个贯穿讲解的实践案例；只有当本章契约允许代码实现细节时才写代码，否则用“概念性诊断/手算/表格比较”案例替代代码。
+${structureRules(isLecture)}
 - 代码与块公式是讲解的佐证、不是主体：每段代码或伪代码前后都必须有文字说明它在做什么、为什么这么写、关键步骤的作用；衡量“讲透”看的是文字讲解，不得用代码或公式堆砌来充篇幅、替代讲解。
 - 公式必须规范：行内公式用 $...$；独立公式、推导、cases、aligned、矩阵必须用 $$...$$ 块公式。
 - 如果确实写代码，必须放在 fenced code block 中，并保留语言名；禁止写不确定注释、伪造变量名或“可能/需检查惯例”这类未清理草稿痕迹。
@@ -181,9 +205,9 @@ textLabelsAllowed: true
 - 严格避免未清理草稿痕迹：不要写“FSH?”、“可能是”、“待确认”、“需检查惯例”、“这里可以补充”等不确定占位表达。
 - 符号一致性（重要）：全书统一使用 Course Bible 的 notation 记号表——同一个量只用同一种写法并逐字沿用，禁止在本章另立记号（如状态价值全书统一写 $v_\\pi(s)$，不得改写成 $V(s)$ 或 $V^\\pi(s)$；动作价值、最优值、随机变量大小写同理）。若 notation 为空，则本章自选一套并全章保持一致。
 - 术语一致性（重要）：概念的中文译名逐字沿用 Course Bible 的 terminology 与 writingConventions，同一概念全书只用一个词（如统一「马尔可夫」不写「马尔科夫」，「Bellman」与「贝尔曼」按约定二选一），不得中途换词。
-- 结构一致性：小节标题一律遵循 writingConventions 规定的编号方案（如统一「N.M」）；固定结尾块标题必须逐字为「## 本章小结」「## 练习」「## 拓展阅读」，不得写成「习题」「小结」「第 N 节」等变体，也不要额外添加「章节导言」之类标题。
+- 结构一致性：${isLecture ? "小节标题一律遵循 writingConventions 规定的编号方案（如统一「N.M」）；固定段落标题必须逐字为「## 问题导入」「## 核心讲解」「## 典型例子」「## 要点整理」「## 练习」，不得写成「章节导言」「本章小结」「拓展阅读」「习题」「第 N 节」等变体。" : "小节标题一律遵循 writingConventions 规定的编号方案（如统一「N.M」）；固定结尾块标题必须逐字为「## 本章小结」「## 练习」「## 拓展阅读」，不得写成「习题」「小结」「第 N 节」等变体，也不要额外添加「章节导言」之类标题。"}
 - 不重复引入：terminology 中 introducedIn 指向本章之前章节的术语，直接使用，不要当作首次出现重新括注定义；只有本章首次引入的术语才展开解释。
-- 若本章是全书收尾「总结与展望」章：以回顾主线、串联各章、指出前沿与后续学习方向为主，不展开新的概念或推导。
+- ${isLecture ? "若本章是开篇「导论」类或收尾「复习」类章节：只做导入、串联与回顾，不展开新的概念或推导。" : "若本章是全书收尾「总结与展望」章：以回顾主线、串联各章、指出前沿与后续学习方向为主，不展开新的概念或推导。"}
 - 开头要自然承接上一章，结尾要自然为下一章铺垫，但不要把这些写成机械标题。
 ${disciplineMixRules(course)}
 

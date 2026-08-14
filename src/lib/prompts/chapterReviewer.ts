@@ -1,14 +1,34 @@
 import { Chapter, Course } from "@/lib/types";
 import { reviewerRubric, textbookSkill } from "./textbookSkill";
+import { lectureReviewerRubric, lectureSkill } from "./lectureSkill";
 
 export function buildChapterReviewPrompt(course: Course, chapter: Chapter, content: string) {
-  return `${textbookSkill()}
+  const isLecture = course.contentMode === "lecture";
+  const priorityIssues = isLecture
+    ? `- 章节编号或标题错配。
+- Markdown 代码块、公式块、列表结构明显损坏。
+- 独立公式没有使用 $$...$$。
+- 讲义偏离体例：没有「问题导入 → 核心讲解 → 典型例子 → 要点整理 → 练习」，或写成了教材式的「定义 / 定理 / 证明 / 章节小结 / 拓展阅读」。
+- 聚焦度失控：塞进不相关内容、偏离本章主题，或把后续章节概念提前展开。
+- 篇幅失控：明显超出讲义短篇幅，出现完整推导、大量定义或堆砌例子。
+- 内容明显浅、散、像博客，而不是能直接用于讲授的讲义。
+- 本章引入的命名概念疑似在文献中查无出处（造词/幻觉概念）。`
+    : `- 章节编号或标题错配。
+- Markdown 代码块、公式块、列表结构明显损坏。
+- 独立公式没有使用 $$...$$。
+- 本章提前展开后续章节概念，导致课程连续性失控。
+- 内容明显浅、散、像博客，而不是教材。
+- 本章引入的命名概念疑似在文献中查无出处（造词/幻觉概念）。`;
+  const categoryEnum = isLecture
+    ? "structure|continuity|math|style|depth|grounding|focus|teachability|repetition|length"
+    : "structure|continuity|math|style|depth|grounding";
+  return `${isLecture ? lectureSkill() : textbookSkill()}
 
-${reviewerRubric()}
+${isLecture ? lectureReviewerRubric() : reviewerRubric()}
 
 # Task: Chapter Review
 
-请审查下面这一章中文教材。只输出 JSON，不要输出 Markdown 或解释文字。
+请审查下面这一章${isLecture ? "中文电子讲义" : "中文教材"}。只输出 JSON，不要输出 Markdown 或解释文字。
 
 JSON 语法要求：
 - 所有字符串值必须在同一行内，禁止直接换行。
@@ -17,12 +37,7 @@ JSON 语法要求：
 - issue 的 message 和 suggestion 要简短，不要把整段代码或公式原样复制进 JSON。
 
 你不是评分机器，而是返修诊断员。请优先找会影响发布的真实问题：
-- 章节编号或标题错配。
-- Markdown 代码块、公式块、列表结构明显损坏。
-- 独立公式没有使用 $$...$$。
-- 本章提前展开后续章节概念，导致课程连续性失控。
-- 内容明显浅、散、像博客，而不是教材。
-- 本章引入的命名概念疑似在文献中查无出处（造词/幻觉概念）。
+${priorityIssues}
 
 JSON 结构：
 {
@@ -30,7 +45,7 @@ JSON 结构：
   "issues": [
     {
       "severity": "low|medium|high",
-      "category": "structure|continuity|math|style|depth|grounding",
+      "category": "${categoryEnum}",
       "message": "具体问题，说明位置或现象",
       "suggestion": "可执行的修复建议"
     }
