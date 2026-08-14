@@ -1,10 +1,10 @@
 import "server-only";
 
-import { createHash } from "node:crypto";
 import { appendJobEvent, completeGenerationJob, createGenerationJob, failGenerationJob, getGenerationJob, patchGenerationJob, upsertGenerationJob } from "./jobs";
+import { getChapterBody, hashChapterContent } from "./chapterContent";
 import { shouldRunInlineGeneration } from "./config";
 import { processChapterFigures } from "./figures";
-import { generateChapter, generateChapterDraft, generateExerciseAnswers, planCourseOutline, reviewExistingChapterDraft } from "./maol/client";
+import { generateChapter, generateChapterDraft, generateExerciseAnswers, generateLecture, planCourseOutline, reviewExistingChapterDraft } from "./maol/client";
 import { markdownToSections } from "./maol/integrator";
 import { ModelOverrides } from "./modelOverrides";
 import { withQuotaConsumption } from "./quota";
@@ -18,6 +18,7 @@ import {
   saveServerGenerationJob,
   saveServerGenerationJobs,
   saveServerQualityReport,
+  updateChapterAnswersIfContentHashMatches,
   updateServerChapter,
 } from "./serverStore";
 import { Chapter, ChapterGenerateResponse, Course, GenerationJob, QualityReport, TextbookMeta } from "./types";
@@ -669,20 +670,25 @@ export async function runExerciseAnswersGenerationJob(input: {
     } as const;
   }
 
-  // Write guard: re-compare against the CURRENT chapter content — the
-  // chapter may have been regenerated while the answer call was in flight.
-  // A mismatch supersedes the job and writes nothing.
-  const latestCourse = await getServerCourse(course.id, input.request);
-  const latestChapter = latestCourse?.chapters.find((item) => item.id === chapterId);
-  const latestContent = latestChapter ? getChapterBody(latestChapter) : "";
+  // Atomic write: the fingerprint is re-read and verified INSIDE the course
+  // update lock together with the answers write, so a chapter regeneration
+  // landing between the check and the write can never receive stale answers.
   const anchorHash = job.sourceContentHash ?? contentHash;
-  if (latestContent && hashChapterContent(latestContent) !== anchorHash) {
-    return await supersedeExerciseAnswersJob(job, latestCourse ?? course, chapterId, input.request);
+  const latestCourse = await getServerCourse(course.id, input.request);
+  let updated = latestCourse ?? course;
+  if (result.answers.length > 0) {
+    const write = await updateChapterAnswersIfContentHashMatches(
+      course.id,
+      chapterId,
+      anchorHash,
+      result.answers,
+      input.request,
+    );
+    if (!write.applied) {
+      return await supersedeExerciseAnswersJob(job, write.course ?? updated, chapterId, input.request);
+    }
+    updated = write.course ?? updated;
   }
-
-  const updated = result.answers.length > 0
-    ? await updateServerChapter(latestCourse ?? course, chapterId, { exerciseAnswers: result.answers }, input.request)
-    : (latestCourse ?? course);
   const completedJob = completeGenerationJob(job.id, chapterId);
   if (completedJob) await saveServerGenerationJob(completedJob, input.request);
 
@@ -717,6 +723,218 @@ async function supersedeExerciseAnswersJob(
   return {
     error: "Answer job superseded by a newer chapter version.",
     status: 409,
+    job: getGenerationJob(job.id) ?? persisted,
+    course,
+    chapter: course.chapters.find((item) => item.id === chapterId),
+  } as const;
+}
+
+/**
+ * On-demand lecture (讲义) generation. Decoupled from the chapter: the
+ * chapter stays untouched, and this runner only ever writes chapter.lecture.
+ * Charged against the generate_lecture quota (user-initiated). Anchored to the
+ * chapter content hash so a mid-flight regeneration supersedes the job
+ * instead of persisting a lecture for an outdated chapter.
+ */
+export async function runLectureGenerationJob(input: {
+  jobId: string;
+  request?: Request;
+  retry?: boolean;
+  claimed?: boolean;
+}): Promise<ChapterGenerationJobResult> {
+  const persistedJob = await getServerGenerationJob(input.jobId, input.request);
+  let job = getGenerationJob(input.jobId) ?? (persistedJob ? upsertGenerationJob(persistedJob) : undefined);
+  if (!job) {
+    return { error: "Generation job not found", status: 404, job: undefined } as const;
+  }
+  if (job.type !== "lecture" || !job.courseId || !job.chapterId) {
+    return { job } as const;
+  }
+  if (job.status === "succeeded" && !input.retry) {
+    const succeededChapterId = job.chapterId;
+    const course = await getServerCourse(job.courseId, input.request);
+    return { job, course, chapter: course?.chapters.find((item) => item.id === succeededChapterId) } as const;
+  }
+  if ((job.status === "running" || job.status === "retrying") && !input.retry && !input.claimed) {
+    return { job } as const;
+  }
+
+  const chapterId = job.chapterId;
+  const course = await getServerCourse(job.courseId, input.request);
+  const chapter = course?.chapters.find((item) => item.id === chapterId);
+  if (!course || !chapter) {
+    const failedJob = failGenerationJob(job.id, "Course or chapter unavailable for lecture generation.");
+    if (failedJob) await saveServerGenerationJob(failedJob, input.request);
+    return {
+      error: "Chapter not found",
+      status: 404,
+      job: getGenerationJob(job.id) ?? failedJob ?? job,
+    } as const;
+  }
+  const content = getChapterBody(chapter);
+  if (!content) {
+    const failedJob = failGenerationJob(job.id, "Chapter content unavailable for lecture generation.");
+    if (failedJob) await saveServerGenerationJob(failedJob, input.request);
+    return {
+      error: "Chapter content unavailable",
+      status: 404,
+      job: getGenerationJob(job.id) ?? failedJob ?? job,
+    } as const;
+  }
+  const contentHash = hashChapterContent(content);
+
+  if (job.sourceContentHash && contentHash !== job.sourceContentHash && !input.retry) {
+    const message = "讲义任务已作废（superseded）：章节正文已被重新生成，内容指纹不一致，未写入任何讲义。可重新生成讲义，以针对当前正文。";
+    const superseded = patchGenerationJob(job.id, { status: "superseded", error: message });
+    const eventJob = appendJobEvent(job.id, {
+      agent: "AUTHOR",
+      status: "superseded",
+      message,
+    }, { preserveJobStatus: true });
+    const persisted = eventJob ?? superseded ?? job;
+    await saveServerGenerationJob(persisted, input.request);
+    return {
+      error: "Lecture job superseded by a newer chapter version.",
+      status: 409,
+      job: getGenerationJob(job.id) ?? persisted,
+      course,
+      chapter,
+    } as const;
+  }
+
+  if (input.retry) {
+    const retryingJob = patchGenerationJob(job.id, {
+      status: "retrying",
+      error: undefined,
+      modelOverrides: job.modelOverrides,
+      sourceContentHash: contentHash,
+    });
+    if (retryingJob) {
+      await saveServerGenerationJob(retryingJob, input.request);
+      job = retryingJob;
+    }
+  } else if (!job.sourceContentHash) {
+    const anchored = patchGenerationJob(job.id, { sourceContentHash: contentHash });
+    if (anchored) {
+      await saveServerGenerationJob(anchored, input.request);
+      job = anchored;
+    }
+  }
+
+  let result: Awaited<ReturnType<typeof withQuotaConsumption<Course>>>;
+  try {
+    result = await withQuotaConsumption(job.userId ?? course.userId, "generate_lecture", async () => {
+      const runningJob = patchGenerationJob(job.id, {
+        activeAgent: "AUTHOR",
+        status: "running",
+        modelOverrides: job.modelOverrides,
+      });
+      const running = runningJob ?? job;
+      await saveServerGenerationJob(running, input.request);
+      await updateServerChapter(course, chapterId, {
+        lecture: { status: "generating" },
+      }, input.request);
+
+      const lecture = await generateLecture(
+        course,
+        chapter,
+        content,
+        job.id,
+        async (updatedJob) => {
+          await saveServerGenerationJob(updatedJob, input.request);
+        },
+        job.modelOverrides,
+      );
+
+      // Write guard: re-read the latest course so a chapter regeneration that
+      // finished while the lecture call was in flight supersedes this job
+      // instead of writing a stale lecture.
+      const latestCourse = await getServerCourse(course.id, input.request);
+      const latestChapter = latestCourse?.chapters.find((item) => item.id === chapterId);
+      const latestContent = latestChapter ? getChapterBody(latestChapter) : "";
+      if (latestContent && hashChapterContent(latestContent) !== contentHash) {
+        throw new StaleLectureError("章节正文在讲义生成期间发生了变化。");
+      }
+
+      return await updateServerChapter(latestCourse ?? course, chapterId, {
+        lecture: {
+          ...lecture,
+          status: "ready",
+          generatedAt: new Date().toISOString(),
+          sourceContentHash: contentHash,
+        },
+      }, input.request);
+    });
+  } catch (error) {
+    if (error instanceof StaleLectureError) {
+      return await failLectureGenerationJob({
+        job,
+        course,
+        chapterId,
+        message: `讲义任务已作废（superseded）：${error.message}`,
+        superseded: true,
+        request: input.request,
+      });
+    }
+    return await failLectureGenerationJob({
+      job,
+      course,
+      chapterId,
+      message: safeErrorMessage(error, "Lecture generation failed."),
+      request: input.request,
+    });
+  }
+
+  if (!result.ok) {
+    const quotaMessage = result.quota.message ?? "Lecture generation quota exceeded.";
+    return await failLectureGenerationJob({
+      job,
+      course,
+      chapterId,
+      message: quotaMessage,
+      status: 429,
+      request: input.request,
+    });
+  }
+
+  const completedJob = completeGenerationJob(job.id, chapterId);
+  if (completedJob) await saveServerGenerationJob(completedJob, input.request);
+  return {
+    job: getGenerationJob(job.id) ?? completedJob,
+    course: result.value,
+    chapter: result.value.chapters.find((item) => item.id === chapterId),
+  } as const;
+}
+
+class StaleLectureError extends Error {}
+
+async function failLectureGenerationJob(input: {
+  job: GenerationJob;
+  course: Course;
+  chapterId: string;
+  message: string;
+  superseded?: boolean;
+  status?: number;
+  request?: Request;
+}): Promise<ChapterGenerationJobResult> {
+  const { job, course, chapterId, message, superseded, status, request } = input;
+  const jobStatus = superseded ? "superseded" : "failed";
+  const patched = patchGenerationJob(job.id, { status: jobStatus, error: message });
+  const eventJob = appendJobEvent(job.id, {
+    agent: "AUTHOR",
+    status: jobStatus,
+    message,
+  }, { preserveJobStatus: true });
+  const persisted = eventJob ?? patched ?? job;
+  await saveServerGenerationJob(persisted, request);
+  if (!superseded) {
+    await updateServerChapter(course, chapterId, {
+      lecture: { status: "failed", error: message },
+    }, request);
+  }
+  return {
+    error: message,
+    status: status ?? (superseded ? 409 : 502),
     job: getGenerationJob(job.id) ?? persisted,
     course,
     chapter: course.chapters.find((item) => item.id === chapterId),
@@ -1217,14 +1435,7 @@ async function applyFigurePipeline<T extends {
   };
 }
 
-function getChapterBody(chapter: Chapter) {
-  return chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
-}
 
-/** Content fingerprint used to anchor decoupled jobs to one chapter version. */
-function hashChapterContent(content: string) {
-  return createHash("sha256").update(content, "utf8").digest("hex");
-}
 
 function interruptedChapterStatus(chapter: Chapter) {
   if (!hasChapterBody(chapter)) return "failed";

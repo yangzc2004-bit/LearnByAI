@@ -2,11 +2,11 @@ import { NextResponse } from "next/server";
 import { requireApiUser } from "@/lib/apiAuth";
 import { getGenerationJobForRequest } from "@/lib/generationJobStatus";
 import { failGenerationJob, getGenerationJob, patchGenerationJob, upsertGenerationJob } from "@/lib/jobs";
-import { runChapterGenerationJob, runCourseGenerationJob } from "@/lib/generationRunner";
+import { runChapterGenerationJob, runCourseGenerationJob, runExerciseAnswersGenerationJob, runLectureGenerationJob } from "@/lib/generationRunner";
 import { parseModelOverridesFromHeaders } from "@/lib/modelOverrides";
 import { publicGenerationJob } from "@/lib/publicGenerationJob";
 import { checkQuota } from "@/lib/quota";
-import { getActiveServerGenerationJobForChapter, getActiveServerGenerationJobForCourse, getServerCourse, getServerGenerationJob, saveServerGenerationJob, updateServerChapter } from "@/lib/serverStore";
+import { getActiveServerGenerationJobForChapter, getActiveServerGenerationJobForChapterOfType, getActiveServerGenerationJobForCourse, getServerCourse, getServerGenerationJob, saveServerGenerationJob, updateServerChapter } from "@/lib/serverStore";
 import { resolveModelOverrides } from "@/lib/userModelConfig";
 import { Chapter, GenerationJob } from "@/lib/types";
 
@@ -50,18 +50,31 @@ export async function POST(
     return NextResponse.json(publicResult(result), { status: 202 });
   }
 
-  const isCourseJob = job.type === "course";
-  const result = isCourseJob
+  // Dispatch by job type: an exercise-answers job must reach its own runner
+  // — the chapter runner would treat the unknown type as a silent no-op.
+  const result = job.type === "course"
     ? await runCourseGenerationJob({
         jobId: id,
         request,
         retry: input.retry,
       })
-    : await runChapterGenerationJob({
-        jobId: id,
-        request,
-        retry: input.retry,
-      });
+    : job.type === "exercise-answers"
+      ? await runExerciseAnswersGenerationJob({
+          jobId: id,
+          request,
+          retry: input.retry,
+        })
+      : job.type === "lecture"
+        ? await runLectureGenerationJob({
+            jobId: id,
+            request,
+            retry: input.retry,
+          })
+        : await runChapterGenerationJob({
+            jobId: id,
+            request,
+            retry: input.retry,
+          });
 
   if ("error" in result) {
     return NextResponse.json(publicResult(result), { status: result.status });
@@ -172,6 +185,9 @@ async function getActiveJobForSameTarget(job: GenerationJob, request: Request) {
   }
   if (job.type === "chapter" && job.chapterId) {
     return getActiveServerGenerationJobForChapter(job.chapterId, request);
+  }
+  if (job.type === "lecture" && job.chapterId) {
+    return getActiveServerGenerationJobForChapterOfType(job.chapterId, "lecture", request);
   }
   return undefined;
 }

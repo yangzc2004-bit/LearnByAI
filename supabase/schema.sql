@@ -128,6 +128,19 @@ create table if not exists usage_events (
   created_at timestamptz not null default now()
 );
 
+create table if not exists chapter_lecture_progress (
+  id uuid primary key,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  course_id uuid not null references courses(id) on delete cascade,
+  chapter_id uuid not null references chapters(id) on delete cascade,
+  completed boolean not null default false,
+  quiz_score integer,
+  quiz_total integer,
+  payload jsonb not null,
+  updated_at timestamptz not null default now(),
+  constraint chapter_lecture_progress_user_chapter_key unique (user_id, chapter_id)
+);
+
 create table if not exists quota_reservations (
   id uuid primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -164,6 +177,7 @@ alter table generation_jobs enable row level security;
 alter table quality_reports enable row level security;
 alter table exports enable row level security;
 alter table usage_events enable row level security;
+alter table chapter_lecture_progress enable row level security;
 alter table quota_reservations enable row level security;
 alter table app_settings enable row level security;
 alter table admin_audit_logs enable row level security;
@@ -194,6 +208,8 @@ drop policy if exists "Users can read own exports" on exports;
 create policy "Users can read own exports" on exports for select using (auth.uid() = user_id);
 drop policy if exists "Users can read own usage" on usage_events;
 create policy "Users can read own usage" on usage_events for select using (auth.uid() = user_id);
+drop policy if exists "Users can read own lecture progress" on chapter_lecture_progress;
+create policy "Users can read own lecture progress" on chapter_lecture_progress for select using (auth.uid() = user_id);
 drop policy if exists "Users can read own quota reservations" on quota_reservations;
 create policy "Users can read own quota reservations" on quota_reservations for select using (auth.uid() = user_id);
 
@@ -409,7 +425,7 @@ returns text
 language sql
 stable
 as $$
-  select 'learnbyai-beta-2026-06-21-01'::text;
+  select 'learnbyai-beta-2026-06-22-01'::text;
 $$;
 
 revoke execute on function public.claim_generation_job(uuid, text, integer, integer, integer) from public, anon, authenticated;
@@ -456,6 +472,12 @@ create index if not exists exports_user_course_created_idx
 
 create index if not exists usage_events_user_action_created_idx
   on usage_events (user_id, action, created_at desc);
+
+create index if not exists chapter_lecture_progress_user_course_idx
+  on chapter_lecture_progress (user_id, course_id);
+
+create index if not exists chapter_lecture_progress_chapter_idx
+  on chapter_lecture_progress (chapter_id, updated_at desc);
 
 create index if not exists quota_reservations_user_action_expires_idx
   on quota_reservations (user_id, action, expires_at);

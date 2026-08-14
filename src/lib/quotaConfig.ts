@@ -3,6 +3,7 @@ import { UsageEvent } from "./types";
 const LIMITS: Record<UsageEvent["action"], number> = {
   create_course: 20,
   generate_chapter: 100,
+  generate_lecture: 100,
   ask_tutor: 300,
   export: 30,
   revise: 200,
@@ -11,6 +12,7 @@ const LIMITS: Record<UsageEvent["action"], number> = {
 const LIMIT_ENV: Record<UsageEvent["action"], string> = {
   create_course: "QUOTA_CREATE_COURSE",
   generate_chapter: "QUOTA_GENERATE_CHAPTER",
+  generate_lecture: "QUOTA_GENERATE_LECTURE",
   ask_tutor: "QUOTA_ASK_TUTOR",
   export: "QUOTA_EXPORT",
   revise: "QUOTA_REVISE",

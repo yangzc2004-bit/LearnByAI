@@ -4,7 +4,7 @@ import { join } from "node:path";
 const schemaPath = join(process.cwd(), "supabase", "schema.sql");
 const rawSql = readFileSync(schemaPath, "utf8");
 const compactSql = rawSql.toLowerCase().replace(/\s+/gu, " ");
-const expectedSchemaVersion = "learnbyai-beta-2026-06-21-01";
+const expectedSchemaVersion = "learnbyai-beta-2026-06-22-01";
 
 const tables = [
   "profiles",
@@ -19,6 +19,7 @@ const tables = [
   "exports",
   "usage_events",
   "quota_reservations",
+  "chapter_lecture_progress",
 ];
 
 for (const table of tables) {
@@ -45,6 +46,7 @@ const requiredSnippets = [
   'create policy "users can read own exports"',
   'create policy "users can read own usage"',
   'create policy "users can read own quota reservations"',
+  'create policy "users can read own lecture progress"',
   "storage_path text",
   "storage_provider text",
   "locked_by text",
@@ -77,6 +79,8 @@ const requiredSnippets = [
   "exports_user_course_created_idx",
   "usage_events_user_action_created_idx",
   "quota_reservations_user_action_expires_idx",
+  "chapter_lecture_progress_user_course_idx",
+  "chapter_lecture_progress_chapter_idx",
   "quality_reports_user_target_idx",
   "insert into storage.buckets",
   "'learnbyai-exports'",
@@ -131,6 +135,9 @@ const forbiddenSnippets = [
   'create policy "users can insert own quota reservations"',
   'create policy "users can update own quota reservations"',
   'create policy "users can delete own quota reservations"',
+  'create policy "users can insert own lecture progress"',
+  'create policy "users can update own lecture progress"',
+  'create policy "users can delete own lecture progress"',
   'create policy "users can insert own export objects"',
   'create policy "users can update own export objects"',
   'create policy "users can delete own export objects"',

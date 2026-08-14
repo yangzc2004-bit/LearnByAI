@@ -19,14 +19,17 @@ test("generation runner queues answers as a separate background job after ready"
   assert.match(src, /type: "exercise-answers"/u);
   assert.match(src, /message: "练习详解已排队，将在后台生成，不影响章节阅读。"/u);
   assert.match(src, /export async function runExerciseAnswersGenerationJob/u);
-  // The background runner only ever writes exerciseAnswers — chapter status
-  // is untouched by the answer pass.
-  assert.ok(src.includes("{ exerciseAnswers: result.answers }"), "runner must only write exerciseAnswers");
+  // The background runner never patches status/content directly — the only
+  // write path is the atomic hash-guarded answers write in the store.
+  const storeSrc = readFileSync("src/lib/serverStore.ts", "utf8");
+  assert.ok(storeSrc.includes("{ ...item, exerciseAnswers }"), "store must only write exerciseAnswers");
+  assert.match(storeSrc, /updateChapterAnswersIfContentHashMatches/u);
   // Content-fingerprint anchoring: the job is pinned to the chapter version
   // it was queued for, and stale jobs are superseded instead of written.
   assert.match(src, /sourceContentHash: hashChapterContent\(input\.content\)/u);
   assert.match(src, /status: "superseded"/u);
-  assert.match(src, /hashChapterContent\(latestContent\) !== anchorHash/u);
+  // The final fingerprint check + write must be the atomic store helper.
+  assert.match(src, /updateChapterAnswersIfContentHashMatches\(/u);
   // Provider failures fail ONLY the answer sub-task.
   assert.match(src, /if \(result\.error\)/u);
 });

@@ -100,7 +100,7 @@ export function mergeModelOverrides(
 
 function normalizeQuotas(value: unknown) {
   const record = isRecord(value) ? value : {};
-  return (["create_course", "generate_chapter", "ask_tutor", "export", "revise"] as const).reduce(
+  return (["create_course", "generate_chapter", "generate_lecture", "ask_tutor", "export", "revise"] as const).reduce(
     (quotas, action) => {
       const parsed = readPositiveInteger(record[action]);
       if (parsed !== undefined) quotas[action] = parsed;

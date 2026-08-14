@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { formatMinutes, totalMinutes } from "@/lib/time";
-import { AgentEvent, Course, EntityStatus, ExportJob, GenerationJob, JobStatus } from "@/lib/types";
+import { AgentEvent, Course, EntityStatus, ExportJob, GenerationJob, JobStatus, LectureProgress } from "@/lib/types";
 import { MarkdownContent } from "@/components/MarkdownContent";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { GenerationStudio } from "@/components/generation-studio/GenerationStudio";
@@ -14,7 +14,7 @@ import {
   stageForEvent,
 } from "@/components/generation-studio/helpers";
 import { effectiveChapterStatus, hasChapterBody, isChapterReadable } from "@/lib/chapterReadiness";
-import { Target, Lightbulb, GraduationCap, ArrowLeft, FileText, ChevronRight, Clock, Download, Activity, BookMarked, Map, ScanSearch } from "lucide-react";
+import { Target, Lightbulb, GraduationCap, ArrowLeft, FileText, ChevronRight, Clock, Download, Activity, BookMarked, CheckCircle2, Map, ScanSearch } from "lucide-react";
 import { apiFetch, subscribeToSse } from "@/lib/clientApi";
 import { publicSafeErrorMessage } from "@/lib/publicSafeError";
 
@@ -114,6 +114,7 @@ export default function CourseOverviewPage() {
   const [auditError, setAuditError] = useState("");
   const [auditResult, setAuditResult] = useState<TerminologyAuditReport | null>(null);
   const [savingFigureMode, setSavingFigureMode] = useState(false);
+  const [lectureProgressMap, setLectureProgressMap] = useState<Record<string, LectureProgress>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -129,6 +130,16 @@ export default function CourseOverviewPage() {
       .catch(() => {
         if (!cancelled) setLoadError("读取课程失败，请稍后重试。");
       });
+
+    apiFetch(`/api/courses/${id}/lecture-progress`)
+      .then((response) => (response.ok ? response.json() : undefined))
+      .then((data) => {
+        if (cancelled) return;
+        if (data && typeof data === "object" && "progress" in data && data.progress && typeof data.progress === "object") {
+          setLectureProgressMap(data.progress as Record<string, LectureProgress>);
+        }
+      })
+      .catch(() => undefined);
 
     return () => {
       cancelled = true;
@@ -677,6 +688,15 @@ export default function CourseOverviewPage() {
                         <Clock size={12} />
                         {formatMinutes(totalMinutes(chapter.time))}
                       </span>
+                      {lectureProgressMap[chapter.id]?.completed && (
+                        <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                          <CheckCircle2 size={12} />
+                          讲义已学
+                          {lectureProgressMap[chapter.id]?.quizScore !== undefined && lectureProgressMap[chapter.id]?.quizTotal !== undefined && (
+                            <span className="font-mono">({lectureProgressMap[chapter.id].quizScore}/{lectureProgressMap[chapter.id].quizTotal})</span>
+                          )}
+                        </span>
+                      )}
                     </div>
                     <span className={`flex items-center gap-1 font-medium transition-opacity ${readable ? "text-foreground opacity-0 group-hover:opacity-100" : "text-muted-foreground/60"}`}>
                       {readable ? "开始阅读" : "暂不可读"} <ChevronRight size={14} />

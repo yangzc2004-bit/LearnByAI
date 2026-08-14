@@ -6,17 +6,18 @@ import { MouseEvent, useCallback, useEffect, useState } from "react";
 import { MarkdownContent } from "@/components/MarkdownContent";
 import { TutorPanel } from "@/components/reader/TutorPanel";
 import { RevisePanel } from "@/components/reader/RevisePanel";
+import { LectureView } from "@/components/reader/LectureView";
 import { useTutor } from "@/lib/hooks/useTutor";
 import { useRevise } from "@/lib/hooks/useRevise";
 import { apiFetch, subscribeToSse } from "@/lib/clientApi";
 import { publicSafeErrorMessage } from "@/lib/publicSafeError";
 import { formatMinutes, totalMinutes } from "@/lib/time";
-import { AgentEvent, Chapter, ChapterGenerateResponse, Course, EntityStatus, ExerciseAnswer, GenerationJob, Section } from "@/lib/types";
+import { AgentEvent, Chapter, ChapterGenerateResponse, ChapterLecture, Course, EntityStatus, ExerciseAnswer, GenerationJob, LectureProgress, Section } from "@/lib/types";
 import { effectiveChapterStatus, hasChapterBody, isChapterAwaitingQuality, isChapterReadable } from "@/lib/chapterReadiness";
 import { stageForEvent } from "@/components/generation-studio/helpers";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ModelSettings } from "@/components/ModelSettings";
-import { ArrowLeft, Bot, ChevronDown, ChevronLeft, ChevronRight, Clock, Download, Menu, PencilLine, X } from "lucide-react";
+import { ArrowLeft, Bot, BookOpen, ChevronDown, ChevronLeft, ChevronRight, Clock, Download, Menu, PencilLine, Presentation, X } from "lucide-react";
 import { toast } from "sonner";
 
 const DEFAULT_REVIEW = "已完成结构、术语与公式一致性检查。";
@@ -137,6 +138,92 @@ function ExerciseAnswersBlock({ answers }: { answers: ExerciseAnswer[] }) {
   );
 }
 
+/**
+ * Status wrapper for the lecture view: entry card (not generated yet),
+ * generating spinner, failure card, or the interactive LectureView itself.
+ */
+function LecturePanel({
+  lecture,
+  chapterNumber,
+  sections,
+  progress,
+  requesting,
+  onRequestLecture,
+  onSaveProgress,
+  onJumpToSection,
+}: {
+  lecture?: ChapterLecture;
+  chapterNumber: number;
+  sections: Section[];
+  progress: LectureProgress | null | undefined;
+  requesting: boolean;
+  onRequestLecture: () => void;
+  onSaveProgress: (score: number, total: number) => Promise<void>;
+  onJumpToSection: (sectionId: string) => void;
+}) {
+  if (lecture?.status === "ready" && lecture.blocks) {
+    return (
+      <LectureView
+        lecture={lecture}
+        chapterNumber={chapterNumber}
+        sections={sections}
+        progress={progress}
+        onSaveProgress={onSaveProgress}
+        onJumpToSection={onJumpToSection}
+      />
+    );
+  }
+
+  if (lecture?.status === "queued" || lecture?.status === "generating") {
+    return (
+      <div className="rounded-lg border border-dashed border-border py-24 text-center">
+        <Presentation size={32} className="mx-auto mb-4 animate-pulse text-muted-foreground/50" />
+        <p className="font-mono text-sm text-muted-foreground">
+          {lecture.status === "queued" ? "讲义已排队，等待生成…" : "AI 正在生成讲义（通常约 1 分钟）…"}
+        </p>
+        <p className="mt-2 text-xs text-muted-foreground/60">
+          讲义会把本章浓缩成 15~20 分钟的自学课：目标 → 分块讲解 → 随堂自测 → 章末小测。
+        </p>
+      </div>
+    );
+  }
+
+  if (lecture?.status === "failed") {
+    return (
+      <div className="rounded-lg border border-destructive/30 bg-destructive/5 py-12 text-center">
+        <p className="font-mono text-sm text-destructive">讲义生成失败{lecture.error ? `：${lecture.error}` : "。"}</p>
+        <button
+          type="button"
+          onClick={onRequestLecture}
+          disabled={requesting}
+          className="mt-5 inline-flex items-center gap-1.5 rounded-md border border-destructive/30 bg-background px-4 py-2 text-xs font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"
+        >
+          <Presentation size={13} /> {requesting ? "请求中…" : "重新生成讲义"}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-8 text-center">
+      <Presentation size={32} className="mx-auto mb-4 text-primary" />
+      <h2 className="mb-2 text-lg font-semibold text-foreground">用讲义快速学完这一章</h2>
+      <p className="mx-auto mb-6 max-w-md text-sm leading-relaxed text-muted-foreground">
+        讲义把本章教材浓缩成 15~20 分钟的自学课：先看目标，分块讲解（直觉 → 概念 → 例子），随堂自测即时对答案，最后小测打分并打卡。没看懂的地方可以一键跳回教材原文。
+      </p>
+      <button
+        type="button"
+        onClick={onRequestLecture}
+        disabled={requesting}
+        className="inline-flex items-center gap-2 rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background disabled:opacity-50"
+      >
+        <Presentation size={15} /> {requesting ? "请求中…" : "生成讲义（约 1 分钟）"}
+      </button>
+      <p className="mt-3 text-xs text-muted-foreground">生成一份讲义会消耗一次{"\u201c"}讲义生成{"\u201d"}配额。</p>
+    </div>
+  );
+}
+
 export default function ReaderPage() {
   const { id, chapterId } = useParams<{ id: string; chapterId: string }>();
   const router = useRouter();
@@ -154,6 +241,10 @@ export default function ReaderPage() {
   const [expandedChapters, setExpandedChapters] = useState<Record<string, boolean>>({});
   const [panel, setPanel] = useState<Panel>(null);
   const [chooser, setChooser] = useState<{ text: string; sectionId?: string } | null>(null);
+
+  const [view, setView] = useState<"textbook" | "lecture">("textbook");
+  const [lectureProgress, setLectureProgress] = useState<LectureProgress | null | undefined>(undefined);
+  const [requestingLecture, setRequestingLecture] = useState(false);
 
   const [tocWidth, setTocWidth] = useState(() => loadPanelWidth("learnbyai-toc-width", 256));
   const [rightWidth, setRightWidth] = useState(() => loadPanelWidth("learnbyai-right-width", 400));
@@ -455,6 +546,92 @@ export default function ReaderPage() {
     }
   }, [applyCourseUpdate, chapter, course, requalitying]);
 
+  const loadLectureProgress = useCallback(() => {
+    apiFetch(`/api/chapters/${chapterId}/lecture-progress?courseId=${id}`)
+      .then((response) => (response.ok ? response.json() : undefined))
+      .then((data) => {
+        if (data && typeof data === "object" && "progress" in data) {
+          setLectureProgress((data.progress as LectureProgress | null) ?? null);
+        }
+      })
+      .catch(() => undefined);
+  }, [chapterId, id]);
+
+  useEffect(() => {
+    if (!isTextbook) return;
+    setLectureProgress(undefined);
+    loadLectureProgress();
+  }, [chapterId, id, isTextbook, loadLectureProgress]);
+
+  const requestLecture = useCallback(async (options: { retry?: boolean } = {}) => {
+    if (!course || !chapter || requestingLecture) return;
+    setRequestingLecture(true);
+    try {
+      const response = await apiFetch(`/api/chapters/${chapter.id}/lecture`, {
+        method: "POST",
+        body: JSON.stringify({ courseId: course.id, retry: options.retry === true }),
+      });
+      const data = (await response.json().catch(() => ({}))) as {
+        course?: Course;
+        job?: GenerationJob;
+        lecture?: unknown;
+        ready?: boolean;
+        retryBlocked?: boolean;
+        error?: string;
+      };
+      if (!response.ok && !data.retryBlocked) throw new Error(data.error ?? "讲义生成请求失败");
+      if (data.retryBlocked) {
+        if (data.course) applyCourseUpdate(data.course);
+        toast.error(data.error ?? "当前章节已有讲义生成任务。");
+        return;
+      }
+      if (data.course) applyCourseUpdate(data.course);
+    } catch (error) {
+      toast.error(publicSafeErrorMessage(error, "讲义生成请求失败，请稍后重试。"));
+    } finally {
+      setRequestingLecture(false);
+    }
+  }, [applyCourseUpdate, chapter, course, requestingLecture]);
+
+  const saveLectureProgress = useCallback(async (score: number, total: number) => {
+    if (!course) return;
+    const response = await apiFetch(`/api/chapters/${chapterId}/lecture-progress`, {
+      method: "POST",
+      body: JSON.stringify({ courseId: course.id, completed: true, quizScore: score, quizTotal: total }),
+    });
+    const data = (await response.json().catch(() => ({}))) as { progress?: LectureProgress; error?: string };
+    if (!response.ok) throw new Error(data.error ?? "学习进度保存失败");
+    if (data.progress) setLectureProgress(data.progress);
+  }, [chapterId, course]);
+
+  const jumpToTextbookSection = useCallback((sectionId: string) => {
+    setView("textbook");
+    window.setTimeout(() => {
+      document.querySelector(`#section-${sectionId}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 80);
+  }, []);
+
+  useEffect(() => {
+    if (view !== "lecture") return;
+    const lectureStatus = chapter?.lecture?.status;
+    if (lectureStatus !== "queued" && lectureStatus !== "generating") return;
+
+    let cancelled = false;
+    const refresh = () => {
+      apiFetch(`/api/courses/${id}`)
+        .then((response) => (response.ok ? response.json() : undefined))
+        .then((data) => {
+          if (!cancelled && data?.course) applyCourseUpdate(data.course as Course);
+        })
+        .catch(() => undefined);
+    };
+    const timer = window.setInterval(refresh, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [applyCourseUpdate, chapter?.lecture?.status, id, view]);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -690,6 +867,26 @@ export default function ReaderPage() {
               <ArrowLeft size={16} />
             </button>
             <span className="font-mono text-xs font-medium text-muted-foreground hidden md:inline-block">{course.topic}</span>
+            {isTextbook && chapterReadable && (
+              <div className="ml-2 flex items-center rounded-md border border-border bg-muted/40 p-0.5">
+                <button
+                  onClick={() => setView("textbook")}
+                  className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors ${
+                    view === "textbook" ? "bg-background font-medium text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <BookOpen size={13} /> 教材
+                </button>
+                <button
+                  onClick={() => setView("lecture")}
+                  className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors ${
+                    view === "lecture" ? "bg-background font-medium text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Presentation size={13} /> 讲义
+                </button>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-4">
             <ModelSettings showLabel />
@@ -795,7 +992,18 @@ export default function ReaderPage() {
             <div className="mb-8 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">{generationError}</div>
           ) : null}
 
-          {loading ? (
+          {view === "lecture" && chapterReadable ? (
+            <LecturePanel
+              lecture={chapter.lecture}
+              chapterNumber={currentIndex + 1}
+              sections={sections}
+              progress={lectureProgress}
+              requesting={requestingLecture}
+              onRequestLecture={() => void requestLecture()}
+              onSaveProgress={saveLectureProgress}
+              onJumpToSection={jumpToTextbookSection}
+            />
+          ) : loading ? (
             <div className="rounded-lg border border-dashed border-border py-24 text-center">
               <Clock size={32} className="mx-auto mb-4 animate-pulse text-muted-foreground/50" />
               <p className="font-mono text-sm text-muted-foreground">{waitMessage || "AI 正在编写本章..."}</p>

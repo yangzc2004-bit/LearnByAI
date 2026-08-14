@@ -4,7 +4,8 @@ import { mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/pr
 import { dirname, join } from "node:path";
 import { claimGenerationJob, deleteGenerationJobsForCourse, patchGenerationJob, releaseGenerationJob, upsertGenerationJob } from "./jobs";
 import { publishCourseChanged, publishGenerationJobChanged } from "./courseEvents";
-import { Annotation, Course, ExportJob, GenerationJob, QualityReport, Revision, UsageEvent } from "./types";
+import { getChapterBody, hashChapterContent } from "./chapterContent";
+import { Annotation, Course, ExerciseAnswer, ExportJob, GenerationJob, LectureProgress, QualityReport, Revision, UsageEvent } from "./types";
 import { normalizeCourse } from "./normalizeCourse";
 import { createSupabaseServiceClient, resolveUserId } from "./supabase/server";
 
@@ -15,6 +16,7 @@ const localExports = new Map<string, ExportJob>();
 const localGenerationJobs = new Map<string, GenerationJob>();
 const localQualityReports = new Map<string, QualityReport>();
 const localUsageEvents: UsageEvent[] = [];
+const localLectureProgress = new Map<string, LectureProgress>();
 const localStorePath = process.env.LEARNBYAI_LOCAL_STORE_PATH || join(process.cwd(), ".learnbyai", "local-beta-store.json");
 const localStoreLockPath = `${localStorePath}.lock`;
 const LOCAL_STORE_LOCK_TIMEOUT_MS = 10_000;
@@ -32,6 +34,7 @@ type LocalStore = {
   generationJobs: GenerationJob[];
   qualityReports: QualityReport[];
   usageEvents: UsageEvent[];
+  lectureProgress: LectureProgress[];
 };
 
 type SupabaseErrorLike = {
@@ -430,6 +433,11 @@ async function clearLocalCourseData(course: Course) {
       localQualityReports.delete(reportId);
     }
   }
+  for (const [progressId, progress] of localLectureProgress) {
+    if (progress.courseId === id || chapterIds.has(progress.chapterId)) {
+      localLectureProgress.delete(progressId);
+    }
+  }
   deleteGenerationJobsForCourse(id);
   await persistLocalStore({ mergeDisk: false });
 }
@@ -452,6 +460,44 @@ export async function updateServerChapter(
   });
 }
 
+
+/**
+ * Atomically write chapter exercise answers ONLY if the chapter content
+ * still matches expectedContentHash. Read + verify + write happen inside
+ * ONE course update lock: a chapter regeneration either lands before this
+ * lock (hash mismatch → nothing is written, caller marks the job
+ * superseded) or after it (its own lock turn re-reads the course that
+ * already contains these answers). This closes the race between the final
+ * fingerprint check and the answers write.
+ */
+export async function updateChapterAnswersIfContentHashMatches(
+  courseId: string,
+  chapterId: string,
+  expectedContentHash: string,
+  exerciseAnswers: ExerciseAnswer[],
+  request?: Request,
+): Promise<{ applied: boolean; course?: Course }> {
+  return withCourseUpdateLock(courseId, async () => {
+    const latestCourse = await getServerCourse(courseId, request);
+    if (!latestCourse) return { applied: false };
+    const chapter = latestCourse.chapters.find((item) => item.id === chapterId);
+    if (!chapter) return { applied: false };
+    if (hashChapterContent(getChapterBody(chapter)) !== expectedContentHash) {
+      return { applied: false, course: latestCourse };
+    }
+    const updated = await saveServerChapterUpdate(
+      {
+        ...latestCourse,
+        chapters: latestCourse.chapters.map((item) =>
+          item.id === chapterId ? { ...item, exerciseAnswers } : item,
+        ),
+      },
+      chapterId,
+      request,
+    );
+    return { applied: true, course: updated };
+  });
+}
 async function saveServerChapterUpdate(course: Course, chapterId: string, request?: Request) {
   const userId = await resolveUserId(request);
   const nextCourse = {
@@ -936,7 +982,15 @@ export async function getActiveServerGenerationJobForCourse(courseId: string, re
 }
 
 export async function getActiveServerGenerationJobForChapter(chapterId: string, request?: Request) {
-  return getActiveServerGenerationJob("chapter_id", chapterId, "chapter", request);
+  return getActiveServerGenerationJobForChapterOfType(chapterId, "chapter", request);
+}
+
+export async function getActiveServerGenerationJobForChapterOfType(
+  chapterId: string,
+  type: GenerationJob["type"],
+  request?: Request,
+) {
+  return getActiveServerGenerationJob("chapter_id", chapterId, type, request);
 }
 
 export async function getServerGenerationJobForWorker(id: string) {
@@ -1391,6 +1445,109 @@ export async function listServerUsageEvents(request?: Request, action?: UsageEve
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 }
 
+/**
+ * Upsert per-user lecture progress for one chapter. Supabase keys on the
+ * (user_id, chapter_id) unique constraint; the local fallback keys on id.
+ */
+export async function saveServerLectureProgress(progress: LectureProgress, request?: Request) {
+  const userId = await resolveUserId(request);
+  const next = {
+    ...progress,
+    userId,
+    updatedAt: new Date().toISOString(),
+  };
+  localLectureProgress.set(next.id, next);
+  await persistLocalStore();
+
+  const supabase = createSupabaseServiceClient();
+  if (!supabase || !isUuid(userId) || !isUuid(next.courseId) || !isUuid(next.chapterId)) {
+    return next;
+  }
+
+  const { data: existing, error: existingError } = await supabase
+    .from("chapter_lecture_progress")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("chapter_id", next.chapterId)
+    .maybeSingle();
+  assertSupabaseNoError("Read lecture progress", existingError);
+
+  if (existing?.id) {
+    await requireSupabaseWrite(
+      "Persist lecture progress",
+      () => supabase.from("chapter_lecture_progress").update({
+        completed: next.completed,
+        quiz_score: next.quizScore ?? null,
+        quiz_total: next.quizTotal ?? null,
+        payload: next,
+        updated_at: next.updatedAt,
+      }).eq("id", existing.id),
+    );
+    return next;
+  }
+
+  await requireSupabaseWrite(
+    "Insert lecture progress",
+    () => supabase.from("chapter_lecture_progress").insert({
+      id: next.id,
+      user_id: userId,
+      course_id: next.courseId,
+      chapter_id: next.chapterId,
+      completed: next.completed,
+      quiz_score: next.quizScore ?? null,
+      quiz_total: next.quizTotal ?? null,
+      payload: next,
+      updated_at: next.updatedAt,
+    }),
+  );
+  return next;
+}
+
+export async function getServerLectureProgress(chapterId: string, request?: Request) {
+  const userId = await resolveUserId(request);
+  const supabase = createSupabaseServiceClient();
+
+  if (supabase && isUuid(userId)) {
+    const { data, error } = await supabase
+      .from("chapter_lecture_progress")
+      .select("payload")
+      .eq("user_id", userId)
+      .eq("chapter_id", chapterId)
+      .maybeSingle();
+    assertSupabaseNoError("Read lecture progress", error);
+    return data?.payload ? (data.payload as LectureProgress) : undefined;
+  }
+
+  await hydrateLocalStore();
+  const matches = [...localLectureProgress.values()]
+    .filter((progress) => progress.chapterId === chapterId)
+    .filter((progress) => progress.userId === userId || userId === "local-beta-user")
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  return matches[0];
+}
+
+export async function listServerLectureProgressForCourse(courseId: string, request?: Request) {
+  const userId = await resolveUserId(request);
+  const supabase = createSupabaseServiceClient();
+
+  if (supabase && isUuid(userId)) {
+    const { data, error } = await supabase
+      .from("chapter_lecture_progress")
+      .select("payload")
+      .eq("user_id", userId)
+      .eq("course_id", courseId)
+      .order("updated_at", { ascending: false });
+    assertSupabaseNoError("List lecture progress", error);
+    return (data ?? []).map((row) => row.payload as LectureProgress);
+  }
+
+  await hydrateLocalStore();
+  return [...localLectureProgress.values()]
+    .filter((progress) => progress.courseId === courseId)
+    .filter((progress) => progress.userId === userId || userId === "local-beta-user")
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
 async function hydrateLocalStore() {
   try {
     await localStoreWriteQueue.catch(() => undefined);
@@ -1426,6 +1583,7 @@ function snapshotLocalStore(): LocalStore {
     generationJobs: [...localGenerationJobs.values()],
     qualityReports: [...localQualityReports.values()],
     usageEvents: [...localUsageEvents],
+    lectureProgress: [...localLectureProgress.values()],
   };
 }
 
@@ -1469,6 +1627,10 @@ function mergeLocalStoreIntoMemory(store: LocalStore) {
     store.usageEvents.forEach((event) => eventsById.set(event.id, event));
     localUsageEvents.splice(0, localUsageEvents.length, ...eventsById.values());
   }
+  store.lectureProgress?.forEach((progress) => {
+    const existing = localLectureProgress.get(progress.id);
+    localLectureProgress.set(progress.id, chooseByUpdatedAt(existing, progress));
+  });
 }
 
 function chooseCourse(existing: Course | undefined, incoming: Course) {

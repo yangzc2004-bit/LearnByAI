@@ -8,7 +8,7 @@ const bucket = process.env.SUPABASE_EXPORTS_BUCKET || "learnbyai-exports";
 const testUserId = process.env.SUPABASE_SMOKE_USER_ID;
 const runRlsSmoke = process.env.SUPABASE_SMOKE_RLS === "true";
 const requireSmoke = process.env.SUPABASE_SMOKE_REQUIRED === "true";
-const expectedSchemaVersion = "learnbyai-beta-2026-06-21-01";
+const expectedSchemaVersion = "learnbyai-beta-2026-06-22-01";
 const expectedExportMimes = [
   "application/pdf",
   "application/x-tex",
@@ -28,6 +28,7 @@ const applicationTables = [
   "exports",
   "usage_events",
   "quota_reservations",
+  "chapter_lecture_progress",
 ];
 
 if (!url || !anonKey || !serviceRoleKey) {
@@ -150,6 +151,7 @@ async function assertRlsIsolation() {
     const qualityReportId = crypto.randomUUID();
     const usageEventId = crypto.randomUUID();
     const quotaReservationId = crypto.randomUUID();
+    const lectureProgressId = crypto.randomUUID();
     const storagePath = `${userA.id}/supabase-smoke/${exportId}.txt`;
     cleanup.courses.push(courseId);
     cleanup.generationJobs.push(generationJobId);
@@ -168,6 +170,7 @@ async function assertRlsIsolation() {
     await insertQualityReportFixture(qualityReportId, chapterId, userA.id);
     await insertUsageEventFixture(usageEventId, userA.id);
     await insertQuotaReservationFixture(quotaReservationId, userA.id);
+    await insertLectureProgressFixture(lectureProgressId, chapterId, courseId, userA.id);
     await service.storage.from(bucket).upload(storagePath, Buffer.from("rls smoke", "utf8"), {
       contentType: "text/plain",
       upsert: true,
@@ -185,6 +188,7 @@ async function assertRlsIsolation() {
       generationJobId,
       qualityReportId,
       quotaReservationId,
+      lectureProgressId,
       sectionId,
       usageEventId,
     });
@@ -663,6 +667,29 @@ async function insertQuotaReservationFixture(reservationId, userId) {
   }
 }
 
+async function insertLectureProgressFixture(progressId, chapterId, courseId, userId) {
+  const now = new Date().toISOString();
+  const { error } = await service.from("chapter_lecture_progress").insert({
+    id: progressId,
+    user_id: userId,
+    course_id: courseId,
+    chapter_id: chapterId,
+    completed: false,
+    payload: {
+      id: progressId,
+      userId,
+      courseId,
+      chapterId,
+      completed: false,
+      updatedAt: now,
+    },
+    updated_at: now,
+  });
+  if (error) {
+    throw new Error(`Failed to insert Supabase smoke lecture progress: ${error.message}`);
+  }
+}
+
 async function assertUserCanReadOwnCourse(client, courseId) {
   const { data, error } = await client.from("courses").select("id").eq("id", courseId);
   if (error || data.length !== 1) {
@@ -955,6 +982,18 @@ function createForbiddenInsertCandidates(userId, fixtures, now) {
         expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
       },
     },
+    {
+      table: "chapter_lecture_progress",
+      row: {
+        id: crypto.randomUUID(),
+        user_id: userId,
+        course_id: fixtures.courseId,
+        chapter_id: fixtures.chapterId,
+        completed: false,
+        payload: { completed: false },
+        updated_at: now,
+      },
+    },
   ];
 }
 
@@ -970,6 +1009,7 @@ function createForbiddenUpdateCandidates(fixtures) {
     { table: "exports", id: fixtures.exportId, patch: { status: "failed" } },
     { table: "usage_events", id: fixtures.usageEventId, patch: { action: "export" } },
     { table: "quota_reservations", id: fixtures.quotaReservationId, patch: { action: "export" } },
+    { table: "chapter_lecture_progress", id: fixtures.lectureProgressId, patch: { completed: true } },
   ];
 }
 
@@ -979,6 +1019,7 @@ function createForbiddenDeleteCandidates(fixtures) {
     { table: "quality_reports", id: fixtures.qualityReportId },
     { table: "usage_events", id: fixtures.usageEventId },
     { table: "quota_reservations", id: fixtures.quotaReservationId },
+    { table: "chapter_lecture_progress", id: fixtures.lectureProgressId },
     { table: "sections", id: fixtures.sectionId },
     { table: "annotations", id: fixtures.annotationId },
     { table: "generation_jobs", id: fixtures.generationJobId },
