@@ -282,7 +282,7 @@ async function renderLecturePdf(course: Course, exportId: string) {
 
   const qa = qaGeneratedTex(tex);
   if (qa.length) {
-    console.warn(`[exports] lecture TeX QA found ${qa.length} issue(s) for course ${course.id}:`, qa.map((item) => item.code));
+    console.warn(`[exports] lecture TeX QA found ${qa.length} issue(s) for course ${course.id}:`, qa.map((item) => item.check));
   }
   if (hasBlockingExportQaIssues(qa)) {
     throw new ExportQaBlockError(

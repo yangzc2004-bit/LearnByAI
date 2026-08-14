@@ -192,8 +192,9 @@ function dropStaleCompanionGuide(course: Course): Course {
   let changed = false;
   const chapters = course.chapters.map((chapter) => {
     const guide = chapter.companionGuide ?? chapter.lecture;
-    const stale = Boolean(guide?.sourceContentHash) &&
-      hashChapterContent(getChapterBody(chapter)) !== guide.sourceContentHash;
+    const sourceHash = guide?.sourceContentHash;
+    const stale = sourceHash !== undefined &&
+      hashChapterContent(getChapterBody(chapter)) !== sourceHash;
     if (!stale) return chapter;
     changed = true;
     const next = { ...chapter };
