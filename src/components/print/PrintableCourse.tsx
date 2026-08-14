@@ -25,6 +25,7 @@ type PrintCourse = {
   topic: string;
   goal?: string;
   profile?: string;
+  contentMode?: "lecture" | "textbook";
   chapters: PrintChapter[];
 };
 
@@ -140,6 +141,7 @@ export default function PrintableCourse({
     ? course.chapters.filter((chapter) => chapter.id === chapterId)
     : course.chapters;
   const wholeCourse = !chapterId;
+  const isLecture = course.contentMode === "lecture";
 
   useEffect(() => {
     let cancelled = false;
@@ -180,11 +182,11 @@ export default function PrintableCourse({
     <div className="pdf-root">
       {wholeCourse && (
         <section className="pdf-cover">
-          <div className="pdf-cover-kicker">LearnByAI · 个性化学习教材</div>
+          <div className="pdf-cover-kicker">{isLecture ? "LearnByAI · 电子讲义" : "LearnByAI · 个性化学习教材"}</div>
           <h1 className="pdf-cover-title">{course.topic}</h1>
           {course.goal && <p className="pdf-cover-goal">{course.goal}</p>}
           <div className="pdf-cover-meta">
-            <span>{course.chapters.length} 章</span>
+            <span>{course.chapters.length} {isLecture ? "讲" : "章"}</span>
             <span>{new Date().toLocaleDateString("zh-CN")}</span>
           </div>
         </section>
@@ -207,7 +209,11 @@ export default function PrintableCourse({
       {chapters.map((chapter, index) => (
         <article className="pdf-chapter" key={chapter.id ?? index}>
           <h1 className="pdf-chapter-title">
-            {wholeCourse && <span className="pdf-chapter-num">{String(course.chapters.indexOf(chapter) + 1).padStart(2, "0")}</span>}
+            {isLecture || wholeCourse ? (
+              <span className="pdf-chapter-num">{isLecture
+                ? `第${course.chapters.indexOf(chapter) + 1}讲`
+                : String(course.chapters.indexOf(chapter) + 1).padStart(2, "0")}</span>
+            ) : null}
             {chapter.title}
           </h1>
           <div className="pdf-prose">

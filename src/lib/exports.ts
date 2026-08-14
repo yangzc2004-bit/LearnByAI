@@ -93,9 +93,13 @@ async function buildExportContent(
     return { content: tex, qaWarnings: formatQaWarnings(qa) };
   }
 
-  if (course.contentMode === "textbook" && !chapter) {
+  if (!chapter) {
     try {
-      const result = await renderTextbookPdf(course, exportId);
+      // 整份 PDF：教材走 ctexbook 模板，电子讲义走 ctexart「第 N 讲」模板，
+      // 两者都先过导出质检再进 XeLaTeX。
+      const result = course.contentMode === "textbook"
+        ? await renderTextbookPdf(course, exportId)
+        : await renderLecturePdf(course, exportId);
       if (hasBlockingExportQaIssues(result.qa)) {
         throw new ExportQaBlockError(
           `导出质检发现阻断性问题，已阻止交付损坏的 PDF：\n${formatQaWarnings(result.qa).join("\n")}`,
@@ -109,7 +113,7 @@ async function buildExportContent(
       // The designed TeX pipeline failed (e.g. a LaTeX error in some chapter
       // content). Fall back to the HTML print render so a whole-book export
       // never hard-fails — the user still gets a complete PDF.
-      console.warn(`[exports] textbook TeX compile failed, falling back to HTML render: ${safeErrorMessage(error, "TeX compile error")}`);
+      console.warn(`[exports] TeX compile failed, falling back to HTML render: ${safeErrorMessage(error, "TeX compile error")}`);
       const markdownQa = qaBookMarkdownForExport(course);
       return {
         content: await renderCoursePdf(course.id, {}),
@@ -214,7 +218,7 @@ function localExportPath(job: ExportJob) {
   return resolveLocalExportPath(job.storagePath, `${job.id}.${job.format}`);
 }
 
-type TexOptions = { assetDir?: string };
+type TexOptions = { assetDir?: string; lectureMode?: boolean };
 type ImageTexOptions = { width?: string; height?: string; keepAspectRatio?: boolean };
 
 async function renderTextbookPdf(course: Course, exportId: string) {
@@ -263,20 +267,50 @@ async function renderTextbookPdf(course: Course, exportId: string) {
   }
 }
 
+/**
+ * XeLaTeX render for the whole-book lecture PDF: writes main.tex through
+ * toLectureTex, gates on export QA BEFORE the first XeLaTeX invocation, and
+ * surfaces compile failures with the project dir + log tail.
+ */
+async function renderLecturePdf(course: Course, exportId: string) {
+  const projectDir = join(getTexProjectStoreDir(), exportId);
+  const assetDir = join(projectDir, "assets");
+  await mkdir(assetDir, { recursive: true });
+  const tex = await toLectureTex(course, { assetDir });
+  const mainTexPath = join(projectDir, "main.tex");
+  await writeFile(mainTexPath, tex, "utf8");
+
+  const qa = qaGeneratedTex(tex);
+  if (qa.length) {
+    console.warn(`[exports] lecture TeX QA found ${qa.length} issue(s) for course ${course.id}:`, qa.map((item) => item.code));
+  }
+  if (hasBlockingExportQaIssues(qa)) {
+    throw new ExportQaBlockError(
+      `导出质检发现阻断性问题，已阻止交付损坏的讲义 PDF：\n${formatQaWarnings(qa).join("\n")}`,
+    );
+  }
+
+  try {
+    const result = await compileLatexProject(mainTexPath);
+    return { pdf: result.pdf, qa };
+  } catch (error) {
+    if (error instanceof TeXCompileError) {
+      throw new Error(
+        [
+          error.message,
+          `TeX project kept at: ${error.projectDir ?? projectDir}`,
+          error.log ? lastInterestingLogLines(error.log) : "",
+          qa.length ? `Export QA issues before compile (${qa.length}):\n${formatQaWarnings(qa).join("\n")}` : "",
+        ].filter(Boolean).join("\n"),
+      );
+    }
+    throw error;
+  }
+}
+
 export async function toTex(course: Course, options: TexOptions = {}) {
   if (course.contentMode === "textbook") return toTextbookTex(course, options);
-
-  const chapters = course.chapters
-    .map((chapter) => `\\section{${escapeTex(chapter.title)}}\n${escapeTex(chapter.content ?? UNGENERATED_CHAPTER_TEXT)}`)
-    .join("\n\n");
-  return `\\documentclass{article}
-\\usepackage{ctex}
-\\begin{document}
-\\title{${escapeTex(course.topic)}}
-\\maketitle
-${chapters}
-\\end{document}
-`;
+  return toLectureTex(course, options);
 }
 
 async function toTextbookTex(course: Course, options: TexOptions = {}) {
@@ -401,6 +435,194 @@ ${chapterTex}
 \\addcontentsline{toc}{chapter}{术语与符号}
 ${terminologyTex(course)}
 ${exerciseAnswersTex(course)}
+\\end{document}
+`;
+}
+
+/** 讲义正文标题预处理：讲标题由模板输出，`#` 行丢弃；其余标题交由 markdownToTex 的 lectureMode 下移一层。 */
+function preprocessLectureContent(content: string): string {
+  return content
+    .replace(/\r\n/gu, "\n")
+    .split("\n")
+    .map((line) => {
+      const match = line.match(/^(#{1,6})\s+/u);
+      if (!match) return line;
+      if (match[1].length === 1) return "";
+      return line;
+    })
+    .join("\n");
+}
+
+function lectureTotalMinutes(course: Course): number {
+  return course.chapters.reduce(
+    (total, chapter) => total
+      + (chapter.time?.readingMinutes ?? 0)
+      + (chapter.time?.exerciseMinutes ?? 0)
+      + (chapter.time?.practiceMinutes ?? 0)
+      + (chapter.time?.extensionMinutes ?? 0),
+    0,
+  );
+}
+
+function lectureMetaTex(course: Course, createdDate: string) {
+  const bible = course.courseBible;
+  const outcomes = (bible.finalOutcomes ?? []).slice(0, 5);
+  const prerequisites = (bible.prerequisites ?? []).slice(0, 5);
+  const outcomeItems = outcomes.map((item) => `\\item ${escapeMarkdownText(item)}`).join("\n");
+  const prerequisiteItems = prerequisites.map((item) => `\\item ${escapeMarkdownText(item)}`).join("\n");
+  const goalText = bible.goalStatement || course.goal;
+  const audience = bible.targetLearner || course.profile;
+  const totalMinutes = lectureTotalMinutes(course);
+  return [
+    "\\section*{课程目标}",
+    "\\markboth{课程目标}{课程目标}",
+    "\\addcontentsline{toc}{section}{课程目标}",
+    goalText ? escapeMarkdownText(goalText) : "",
+    outcomeItems ? `\\begin{itemize}\n${outcomeItems}\n\\end{itemize}` : "",
+    "",
+    "\\section*{适用基础}",
+    "\\markboth{适用基础}{适用基础}",
+    "\\addcontentsline{toc}{section}{适用基础}",
+    audience ? `\\noindent 适用读者：${escapeMarkdownText(audience)}` : "",
+    prerequisiteItems ? `\\noindent 建议预备知识：\\begin{itemize}\n${prerequisiteItems}\n\\end{itemize}` : "",
+    "",
+    "\\section*{学习时间}",
+    "\\markboth{学习时间}{学习时间}",
+    "\\addcontentsline{toc}{section}{学习时间}",
+    `本讲义共 ${course.chapters.length} 讲，预计总学习时间约 ${totalMinutes} 分钟，生成日期 ${escapeTex(createdDate)}。`,
+  ].filter(Boolean).join("\n\n");
+}
+
+/**
+ * 电子讲义整份 TeX 转换器（ctexart）：以「第 N 讲」组织内容，图/表/公式按
+ * 讲次.序号 计数（section 计数器即讲序号），封面固定为「LearnByAI · 电子讲义」，
+ * 绝不出现教材封面文案。
+ */
+async function toLectureTex(course: Course, options: TexOptions = {}) {
+  const title = course.topic;
+  const goal = course.courseBible.goalStatement || course.goal;
+  const createdDate = formatCourseDate(course.createdAt);
+  const totalMinutes = lectureTotalMinutes(course);
+
+  const lectureTex = (
+    await Promise.all(
+      course.chapters.map(async (chapter, index) => {
+        const lectureNumber = index + 1;
+        const content = chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
+        return [
+          `\\section*{第 ${lectureNumber} 讲 · ${escapeTex(chapter.title)}}`,
+          `\\markboth{第 ${lectureNumber} 讲 · ${escapeTex(chapter.title)}}{第 ${lectureNumber} 讲 · ${escapeTex(chapter.title)}}`,
+          `\\addcontentsline{toc}{section}{第 ${lectureNumber} 讲 · ${escapeTex(chapter.title)}}`,
+          `\\refstepcounter{section}\\label{lecture-${lectureNumber}}`,
+          chapter.description ? `\\begin{quote}\\small\\itshape ${escapeMarkdownText(chapter.description)}\\end{quote}` : "",
+          await markdownToTex(preprocessLectureContent(content), { ...options, lectureMode: true }),
+        ].filter(Boolean).join("\n\n");
+      }),
+    )
+  ).join("\n\n");
+
+  return `\\documentclass[UTF8,openany,oneside,12pt]{ctexart}
+\\usepackage[a4paper,top=2.8cm,bottom=2.8cm,left=3.0cm,right=2.6cm,headheight=15pt]{geometry}
+\\usepackage{amsmath,amssymb,amsthm,mathtools}
+\\usepackage{booktabs,longtable,array,ragged2e,colortbl,graphicx,float}
+\\usepackage{caption}
+\\usepackage{enumitem}
+\\usepackage{fancyhdr}
+\\usepackage{xcolor}
+\\usepackage{listings,upquote}
+\\usepackage{needspace}
+\\usepackage{pdflscape}
+\\usepackage[hidelinks]{hyperref}
+\\makeatletter
+\\providecommand{\\cmrsideswitch}{}
+% CJK inside math-mode \\text{} must use \\mbox so xeCJK typesets it with the
+% CJK font instead of lmroman (which has no CJK glyphs → blank spots).
+\\let\\learnbyaiplaintext\\text
+\\renewcommand{\\text}[1]{\\ifmmode \\mathop{\\mbox{\\learnbyaiplaintext{#1}}}\\else \\learnbyaiplaintext{#1}\\fi}
+\\makeatother
+\\hypersetup{pdftitle={LearnByAI · 电子讲义：${escapeTex(title)}},pdfauthor={LearnByAI}}
+\\setcounter{tocdepth}{2}
+\\setcounter{secnumdepth}{2}
+\\linespread{1.16}
+\\setlength{\\parindent}{2em}
+\\setlength{\\parskip}{0pt}
+\\setlist[itemize]{leftmargin=2.2em,itemsep=0.25em,topsep=0.35em}
+\\setlist[enumerate]{leftmargin=2.2em,itemsep=0.25em,topsep=0.35em}
+\\captionsetup{font=small,labelfont=bf,labelsep=quad}
+\\definecolor{LearnByAITableHeader}{HTML}{F1F3F5}
+\\definecolor{LearnByAICodeBackground}{HTML}{F5F7FA}
+\\definecolor{LearnByAICodeBorder}{HTML}{B9C1CC}
+\\definecolor{LearnByAICodeKeyword}{HTML}{9B3328}
+\\definecolor{LearnByAICodeComment}{HTML}{55705A}
+\\definecolor{LearnByAICodeString}{HTML}{285D86}
+\\definecolor{LearnByAICodeMeta}{HTML}{5F6977}
+\\newcolumntype{L}[1]{>{\\RaggedRight\\arraybackslash}p{\\dimexpr#1\\linewidth-2\\tabcolsep\\relax}}
+\\lstdefinestyle{learnbyai}{
+  backgroundcolor=\\color{LearnByAICodeBackground},
+  basicstyle=\\small\\ttfamily,
+  keywordstyle=\\bfseries\\color{LearnByAICodeKeyword},
+  commentstyle=\\itshape\\color{LearnByAICodeComment},
+  stringstyle=\\color{LearnByAICodeString},
+  frame=single,
+  framerule=0.5pt,
+  rulecolor=\\color{LearnByAICodeBorder},
+  framesep=8pt,
+  xleftmargin=0.4em,
+  xrightmargin=0.4em,
+  framexleftmargin=0.4em,
+  framexrightmargin=0.4em,
+  breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  upquote=true,
+  tabsize=4,
+  aboveskip=1em,
+  belowskip=1em,
+  captionpos=t
+}
+\\renewcommand{\\figurename}{图}
+\\renewcommand{\\tablename}{表}
+% 讲次.序号：section 计数器即「讲」序号（由每讲的 \\refstepcounter 推进）。
+\\numberwithin{figure}{section}
+\\numberwithin{table}{section}
+\\numberwithin{equation}{section}
+\\newtheorem{definition}{定义}[section]
+\\newtheorem{example}{例}[section]
+\\newtheorem{theorem}{定理}[section]
+\\newtheorem{algorithm}{算法}[section]
+\\pagestyle{fancy}
+\\fancyhf{}
+\\fancyhead[C]{\\small\\nouppercase{\\leftmark}}
+\\fancyfoot[C]{\\thepage}
+\\renewcommand{\\headrulewidth}{0.4pt}
+\\fancypagestyle{plain}{\\fancyhf{}\\fancyfoot[C]{\\thepage}\\renewcommand{\\headrulewidth}{0pt}}
+\\emergencystretch=2em
+\\sloppy
+\\begin{document}
+\\pagenumbering{roman}
+\\begin{titlepage}
+\\thispagestyle{empty}
+\\centering
+\\vspace*{0.26\\textheight}
+{\\LARGE\\bfseries LearnByAI · 电子讲义\\par}
+\\vspace{1.6em}
+{\\Huge\\bfseries\\begin{minipage}{0.84\\textwidth}\\centering\\linespread{1.12}\\selectfont ${escapeTex(title)}\\end{minipage}\\par}
+\\vspace{1.2em}
+{\\Large\\begin{minipage}{0.72\\textwidth}\\centering ${escapeTex(goal)}\\end{minipage}\\par}
+\\vfill
+{\\normalsize 共 ${course.chapters.length} 讲 · 总学习时间约 ${totalMinutes} 分钟\\par}
+\\vspace{0.8em}
+{\\small 生成日期 ${escapeTex(createdDate)}\\par}
+\\end{titlepage}
+\\cleardoublepage
+\\tableofcontents
+\\cleardoublepage
+${lectureMetaTex(course, createdDate)}
+\\cleardoublepage
+\\pagenumbering{arabic}
+${lectureTex}
 \\end{document}
 `;
 }
@@ -643,7 +865,8 @@ export async function markdownToTex(markdown: string, options: TexOptions = {}) 
   // Per-chapter state: which TeX heading levels have already been emitted, so
   // orphan markdown levels can be compacted upward instead of leaving a
   // numbering gap (the "2.4.0.1" defect). Fresh per invocation = per chapter.
-  const emittedHeadingLevels = new Set<number>();
+  // Lecture mode: the 讲 heading owns \section — seed level 2 so body headings compact onto \subsection and below.
+  const emittedHeadingLevels = new Set<number>(options.lectureMode ? [2] : []);
 
   while (index < lines.length) {
     const line = lines[index] ?? "";
@@ -750,7 +973,7 @@ export async function markdownToTex(markdown: string, options: TexOptions = {}) 
       const heading = stripHeadingNumber(headingLine[2] ?? "");
       fixedListKind = fixedListKindForHeading(heading);
       const split = splitOversizedHeading(heading);
-      const command = texHeadingCommand(markdownLevel, emittedHeadingLevels);
+      const command = texHeadingCommand(markdownLevel, emittedHeadingLevels, options.lectureMode ? 1 : 0);
       out.push(`${command}{${escapeMarkdownText(split ? split.title : heading)}}`);
       if (split) out.push("", escapeMarkdownText(split.body));
       index += 1;
@@ -935,17 +1158,20 @@ function stripHeadingNumber(text: string) {
  * "2.4.0.1"). Level 5 maps to \paragraph, which is unnumbered at
  * secnumdepth=3, so it can stay put without creating a numbering gap.
  */
-function texHeadingCommand(markdownLevel: number, emitted: Set<number>) {
-  if (markdownLevel === 2) {
+function texHeadingCommand(markdownLevel: number, emitted: Set<number>, levelOffset = 0) {
+  // Lecture mode shifts content headings one level down (## → \subsection):
+  // the 讲 heading owns \section, so body headings must never reach it.
+  const level = markdownLevel + levelOffset;
+  if (level === 2) {
     emitted.add(2);
     return "\\section";
   }
-  if (markdownLevel === 3) {
+  if (level === 3) {
     const effective = emitted.has(2) ? 3 : 2;
     emitted.add(effective);
     return effective === 3 ? "\\subsection" : "\\section";
   }
-  if (markdownLevel === 4) {
+  if (level === 4) {
     const effective = emitted.has(3) ? 4 : emitted.has(2) ? 3 : 2;
     emitted.add(effective);
     return effective === 4 ? "\\subsubsection" : effective === 3 ? "\\subsection" : "\\section";

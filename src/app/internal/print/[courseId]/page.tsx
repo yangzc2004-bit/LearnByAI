@@ -31,6 +31,7 @@ export default async function PrintCoursePage({
         topic: course.topic,
         goal: course.goal,
         profile: course.profile,
+        contentMode: course.contentMode,
         chapters: course.chapters.map((chapterItem) => ({
           id: chapterItem.id,
           title: chapterItem.title,
