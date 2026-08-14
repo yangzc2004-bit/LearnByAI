@@ -2,7 +2,7 @@ import type { ModelOverrides } from "./modelOverrides";
 
 export type EntityStatus = "pending" | "queued" | "generating" | "draft_ready" | "quality_failed" | "ready" | "failed";
 
-export type JobStatus = "pending" | "queued" | "running" | "retrying" | "succeeded" | "failed";
+export type JobStatus = "pending" | "queued" | "running" | "retrying" | "succeeded" | "failed" | "superseded";
 
 export type AgentName = "ASSISTANT" | "ARCHITECT" | "AUTHOR" | "POLISHER" | "REVIEWER" | "TUTOR" | "REVISER";
 
@@ -301,6 +301,10 @@ export type GenerationJob = {
   lockedUntil?: string;
   attempts?: number;
   modelOverrides?: ModelOverrides;
+  /** Content fingerprint anchoring decoupled jobs (e.g. exercise-answers)
+   *  to a specific chapter version: results are only written while the
+   *  chapter content still matches this hash. */
+  sourceContentHash?: string;
   planningCheckpoint?: {
     researchCompleted?: boolean;
     researchDate?: string;

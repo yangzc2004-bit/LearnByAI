@@ -95,7 +95,7 @@ export default async function AdminJobsPage({ searchParams }: { searchParams: Pr
               <td className="px-4 py-3">
                 <div className="flex flex-wrap items-center gap-2">
                   {job.status === "failed" && !processed && <AdminActionButton action="acknowledge_job" payload={{ jobId: job.id }} label="标记已处理" />}
-                  {job.status === "failed" && <AdminActionButton action="retry_job" payload={{ jobId: job.id }} label="重试" confirmText={`确认重试任务 ${job.id}？`} />}
+                  {(job.status === "failed" || job.status === "superseded") && <AdminActionButton action="retry_job" payload={{ jobId: job.id }} label="重试" confirmText={`确认重试任务 ${job.id}？`} />}
                   <RowMenu>
                     {active ? (
                       <AdminActionButton action="cancel_job" payload={{ jobId: job.id }} label="取消任务" confirmText={`确认取消任务 ${job.id}？`} variant="danger" />

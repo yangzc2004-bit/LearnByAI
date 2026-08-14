@@ -1,5 +1,6 @@
 import "server-only";
 
+import { createHash } from "node:crypto";
 import { appendJobEvent, completeGenerationJob, createGenerationJob, failGenerationJob, getGenerationJob, patchGenerationJob, upsertGenerationJob } from "./jobs";
 import { shouldRunInlineGeneration } from "./config";
 import { processChapterFigures } from "./figures";
@@ -548,6 +549,7 @@ async function queueExerciseAnswersJob(input: {
     status: "queued",
     modelOverrides: input.overrides,
     message: "练习详解已排队，将在后台生成，不影响章节阅读。",
+    sourceContentHash: hashChapterContent(input.content),
   });
   const persisted = await saveServerGenerationJob(answerJob, input.request);
   if (persisted && shouldRunInlineGeneration(input.request)) {
@@ -589,18 +591,6 @@ export async function runExerciseAnswersGenerationJob(input: {
   if ((job.status === "running" || job.status === "retrying") && !input.retry && !input.claimed) {
     return { job } as const;
   }
-  if (input.retry) {
-    const retryingJob = patchGenerationJob(job.id, {
-      status: "retrying",
-      error: undefined,
-      modelOverrides: job.modelOverrides,
-    });
-    if (retryingJob) {
-      await saveServerGenerationJob(retryingJob, input.request);
-      job = retryingJob;
-    }
-  }
-
   const chapterId = job.chapterId;
   const course = job.courseId ? await getServerCourse(job.courseId, input.request) : undefined;
   const chapter = course?.chapters.find((item) => item.id === chapterId);
@@ -623,6 +613,35 @@ export async function runExerciseAnswersGenerationJob(input: {
       job: getGenerationJob(job.id) ?? failedJob ?? job,
     } as const;
   }
+  const contentHash = hashChapterContent(content);
+
+  // Superseded guard (before the call): the job was anchored to an older
+  // chapter version at queue time. An explicit retry re-anchors to the
+  // CURRENT content instead of being discarded.
+  if (job.sourceContentHash && contentHash !== job.sourceContentHash && !input.retry) {
+    return await supersedeExerciseAnswersJob(job, course, chapterId, input.request);
+  }
+
+  if (input.retry) {
+    const retryingJob = patchGenerationJob(job.id, {
+      status: "retrying",
+      error: undefined,
+      modelOverrides: job.modelOverrides,
+      sourceContentHash: contentHash,
+    });
+    if (retryingJob) {
+      await saveServerGenerationJob(retryingJob, input.request);
+      job = retryingJob;
+    }
+  } else if (!job.sourceContentHash) {
+    // Legacy queued job without an anchor: anchor it now so the write
+    // guard below still applies.
+    const anchored = patchGenerationJob(job.id, { sourceContentHash: contentHash });
+    if (anchored) {
+      await saveServerGenerationJob(anchored, input.request);
+      job = anchored;
+    }
+  }
 
   const overrides = job.modelOverrides;
   const runningJob = patchGenerationJob(job.id, {
@@ -632,21 +651,75 @@ export async function runExerciseAnswersGenerationJob(input: {
   }) ?? job;
   await saveServerGenerationJob(runningJob, input.request);
 
-  const answers = await generateExerciseAnswers(course, chapter, content, job.id, async (updatedJob) => {
+  const result = await generateExerciseAnswers(course, chapter, content, job.id, async (updatedJob) => {
     await saveServerGenerationJob(updatedJob, input.request);
   }, overrides);
 
+  // Provider failure fails ONLY the answer sub-task — the chapter stays
+  // ready and untouched; the admin sees the real error and can retry.
+  if (result.error) {
+    const failedJob = failGenerationJob(job.id, `练习详解生成失败（章节不受影响）：${result.error}`);
+    if (failedJob) await saveServerGenerationJob(failedJob, input.request);
+    return {
+      error: result.error,
+      status: 502,
+      job: getGenerationJob(job.id) ?? failedJob ?? job,
+      course,
+      chapter,
+    } as const;
+  }
+
+  // Write guard: re-compare against the CURRENT chapter content — the
+  // chapter may have been regenerated while the answer call was in flight.
+  // A mismatch supersedes the job and writes nothing.
   const latestCourse = await getServerCourse(course.id, input.request);
-  const updated = answers.length > 0
-    ? await updateServerChapter(latestCourse ?? course, chapter.id, { exerciseAnswers: answers }, input.request)
+  const latestChapter = latestCourse?.chapters.find((item) => item.id === chapterId);
+  const latestContent = latestChapter ? getChapterBody(latestChapter) : "";
+  const anchorHash = job.sourceContentHash ?? contentHash;
+  if (latestContent && hashChapterContent(latestContent) !== anchorHash) {
+    return await supersedeExerciseAnswersJob(job, latestCourse ?? course, chapterId, input.request);
+  }
+
+  const updated = result.answers.length > 0
+    ? await updateServerChapter(latestCourse ?? course, chapterId, { exerciseAnswers: result.answers }, input.request)
     : (latestCourse ?? course);
-  const completedJob = completeGenerationJob(job.id, chapter.id);
+  const completedJob = completeGenerationJob(job.id, chapterId);
   if (completedJob) await saveServerGenerationJob(completedJob, input.request);
 
   return {
     job: getGenerationJob(job.id) ?? completedJob,
     course: updated,
-    chapter: updated.chapters.find((item) => item.id === chapter.id),
+    chapter: updated.chapters.find((item) => item.id === chapterId),
+  } as const;
+}
+
+/**
+ * Mark a stale answer job as superseded (distinct from failed): the chapter
+ * content changed since the job was queued, so the generated answers would
+ * belong to an older version. Nothing is written; an admin retry re-anchors
+ * the job to the current content.
+ */
+async function supersedeExerciseAnswersJob(
+  job: GenerationJob,
+  course: Course,
+  chapterId: string,
+  request?: Request,
+): Promise<ChapterGenerationJobResult> {
+  const message = "答案任务已作废（superseded）：章节正文已被重新生成，内容指纹不一致，未写入任何答案。可在管理后台重试，以针对当前正文重新生成。";
+  const superseded = patchGenerationJob(job.id, { status: "superseded", error: message });
+  const eventJob = appendJobEvent(job.id, {
+    agent: "REVIEWER",
+    status: "superseded",
+    message,
+  }, { preserveJobStatus: true });
+  const persisted = eventJob ?? superseded ?? job;
+  await saveServerGenerationJob(persisted, request);
+  return {
+    error: "Answer job superseded by a newer chapter version.",
+    status: 409,
+    job: getGenerationJob(job.id) ?? persisted,
+    course,
+    chapter: course.chapters.find((item) => item.id === chapterId),
   } as const;
 }
 
@@ -1146,6 +1219,11 @@ async function applyFigurePipeline<T extends {
 
 function getChapterBody(chapter: Chapter) {
   return chapter.content ?? chapter.sections?.map((section) => section.content).join("\n\n") ?? "";
+}
+
+/** Content fingerprint used to anchor decoupled jobs to one chapter version. */
+function hashChapterContent(content: string) {
+  return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
 function interruptedChapterStatus(chapter: Chapter) {

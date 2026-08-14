@@ -12,6 +12,7 @@ export const JOB_STATUS_LABEL: Record<string, string> = {
   retrying: "重试中",
   succeeded: "已完成",
   failed: "失败",
+  superseded: "已作废",
 };
 
 export const CHAPTER_STATUS_LABEL: Record<string, string> = {

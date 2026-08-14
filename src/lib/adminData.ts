@@ -1122,7 +1122,7 @@ export async function retryAdminJob(jobId: string, context: AdminActionContext) 
   const job = data.payload as GenerationJob;
   const modelOverrides = await findAdminModelOverridesForChapter(job.courseId, job.chapterId, job.userId);
   const retryAsGeneration = await shouldRetryAdminJobAsGeneration(job);
-  if (job.status !== "failed") throw new Error("只有失败任务可以重试。");
+  if (job.status !== "failed" && job.status !== "superseded") throw new Error("只有失败或已作废的任务可以重试。");
   const now = new Date().toISOString();
   const nextJob: GenerationJob = {
     ...job,

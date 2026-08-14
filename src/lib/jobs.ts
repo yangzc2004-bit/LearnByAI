@@ -19,6 +19,7 @@ export function createGenerationJob(input: {
   status?: JobStatus;
   message?: string;
   modelOverrides?: GenerationJob["modelOverrides"];
+  sourceContentHash?: string;
 }) {
   hydrateJobs();
   const now = new Date().toISOString();
@@ -32,6 +33,7 @@ export function createGenerationJob(input: {
     activeAgent: input.activeAgent,
     status: input.status ?? "pending",
     modelOverrides: input.modelOverrides,
+    ...(input.sourceContentHash ? { sourceContentHash: input.sourceContentHash } : {}),
     events: [],
     createdAt: now,
     updatedAt: now,

@@ -35,6 +35,7 @@ const JOB_STATUS_LABEL: Record<JobStatus, string> = {
   retrying: "\u91cd\u8bd5\u4e2d",
   succeeded: "\u5df2\u5b8c\u6210",
   failed: "\u5931\u8d25",
+  superseded: "\u5df2\u4f5c\u5e9f",
 };
 
 const QUALITY_STATUS_LABEL: Record<string, string> = {

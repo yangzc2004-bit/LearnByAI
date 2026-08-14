@@ -29,6 +29,7 @@ export const JOB_STATUS_LABEL: Record<JobStatus, string> = {
   retrying: "重试中",
   succeeded: "已完成",
   failed: "失败",
+  superseded: "已作废",
 };
 
 export const STAGES: Array<{ key: StageKey; agent: string; label: string }> = [

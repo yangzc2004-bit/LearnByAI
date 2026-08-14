@@ -24,7 +24,7 @@ import { buildConceptGroundingIssues, normalizeNamedConcepts, normalizeSuspectCo
 import { runChapterQualityPipelineWithRepair } from "../quality/pipeline";
 import { safeErrorMessage } from "../safeError";
 import { assertChapterPositionRequirements } from "../courseRequirementConstraints";
-import { Chapter, ChapterContract, ChapterGenerateResponse, ContentMode, Course, CourseBible, CourseCreateResponse, CourseDifficulty, CourseInputMaterial, DisciplineKind, ExplanationStyle, GenerationJob, GenerationProfile, LearningMode, QualityIssue, QualityReport, RevisionMode, RevisionScope, Section } from "../types";
+import { Chapter, ChapterContract, ChapterGenerateResponse, ContentMode, Course, CourseBible, CourseCreateResponse, CourseDifficulty, CourseInputMaterial, DisciplineKind, ExerciseAnswer, ExplanationStyle, GenerationJob, GenerationProfile, LearningMode, QualityIssue, QualityReport, RevisionMode, RevisionScope, Section } from "../types";
 import { researchLatestCourseKnowledge } from "../webResearch";
 import { dispatchAgentText } from "./dispatcher";
 import { assertMockFallbackAllowed } from "./fallback";
@@ -470,10 +470,19 @@ export type ChapterGenerationStage = {
 
 const EXERCISE_ANSWERS_TIMEOUT_MS = 180_000;
 
+export type ExerciseAnswersGenerationResult = {
+  answers: ExerciseAnswer[];
+  /** Present when the answer PROVIDER failed (timeout/403/522/...). The
+   *  chapter itself is unaffected, but the background answer job must be
+   *  marked failed — never silently reported as succeeded. */
+  error?: string;
+};
+
 /**
  * Separate answer pass: generate detailed solutions for the 「## 练习」
  * questions after the chapter passed quality review. Non-blocking — a
- * provider failure leaves the chapter without answers instead of failing it.
+ * provider failure leaves the chapter without answers instead of failing it,
+ * and the caller uses result.error to fail only the answer sub-task.
  */
 export async function generateExerciseAnswers(
   course: Course,
@@ -482,8 +491,8 @@ export async function generateExerciseAnswers(
   jobId: string,
   onJobUpdate?: (job: GenerationJob) => Promise<void> | void,
   overrides?: ModelOverrides,
-) {
-  if (!/练习|习题/u.test(content)) return [];
+): Promise<ExerciseAnswersGenerationResult> {
+  if (!/练习|习题/u.test(content)) return { answers: [] };
   const questionCount = countExerciseQuestions(content);
   if (questionCount === 0) {
     const skippedJob = appendJobEvent(jobId, {
@@ -492,7 +501,7 @@ export async function generateExerciseAnswers(
       message: "未找到「## 练习」编号题目列表，跳过练习详解。",
     }, { preserveJobStatus: true });
     if (skippedJob) await onJobUpdate?.(skippedJob);
-    return [];
+    return { answers: [] };
   }
   const startedJob = appendJobEvent(jobId, {
     agent: "REVIEWER",
@@ -523,7 +532,7 @@ export async function generateExerciseAnswers(
         : "练习详解为空，本章暂不附答案。",
     }, { preserveJobStatus: true });
     if (doneJob) await onJobUpdate?.(doneJob);
-    return answers;
+    return { answers };
   } catch (error) {
     const skippedJob = appendJobEvent(jobId, {
       agent: "REVIEWER",
@@ -531,7 +540,7 @@ export async function generateExerciseAnswers(
       message: `练习详解暂时不可用，本章暂不附答案：${safeErrorMessage(error, "REVIEWER failed")}`,
     }, { preserveJobStatus: true });
     if (skippedJob) await onJobUpdate?.(skippedJob);
-    return [];
+    return { answers: [], error: safeErrorMessage(error, "REVIEWER failed") };
   }
 }
 

@@ -8,6 +8,10 @@ test("chapter generation no longer awaits exercise answers inline", () => {
   // chapter WITHOUT waiting on the answer provider.
   assert.doesNotMatch(src, /await generateExerciseAnswers/u);
   assert.match(src, /export async function generateExerciseAnswers/u);
+  // Provider failures are surfaced as { answers: [], error } so the
+  // background job can be marked failed instead of succeeded.
+  assert.match(src, /ExerciseAnswersGenerationResult/u);
+  assert.match(src, /error: safeErrorMessage\(error, "REVIEWER failed"\)/u);
 });
 
 test("generation runner queues answers as a separate background job after ready", () => {
@@ -17,7 +21,14 @@ test("generation runner queues answers as a separate background job after ready"
   assert.match(src, /export async function runExerciseAnswersGenerationJob/u);
   // The background runner only ever writes exerciseAnswers — chapter status
   // is untouched by the answer pass.
-  assert.ok(src.includes("{ exerciseAnswers: answers }"), "runner must only write exerciseAnswers");
+  assert.ok(src.includes("{ exerciseAnswers: result.answers }"), "runner must only write exerciseAnswers");
+  // Content-fingerprint anchoring: the job is pinned to the chapter version
+  // it was queued for, and stale jobs are superseded instead of written.
+  assert.match(src, /sourceContentHash: hashChapterContent\(input\.content\)/u);
+  assert.match(src, /status: "superseded"/u);
+  assert.match(src, /hashChapterContent\(latestContent\) !== anchorHash/u);
+  // Provider failures fail ONLY the answer sub-task.
+  assert.match(src, /if \(result\.error\)/u);
 });
 
 test("generation worker dispatches exercise-answers jobs", () => {
@@ -25,6 +36,15 @@ test("generation worker dispatches exercise-answers jobs", () => {
   assert.match(src, /claimed\.type === "exercise-answers"/u);
 });
 
+
+test("superseded answer jobs are labeled and retryable", () => {
+  const coursePage = readFileSync("src/app/courses/[id]/page.tsx", "utf8");
+  assert.match(coursePage, /superseded: "\\u5df2\\u4f5c\\u5e9f"/u);
+  const adminData = readFileSync("src/lib/adminData.ts", "utf8");
+  assert.match(adminData, /job\.status !== "failed" && job\.status !== "superseded"/u);
+  const adminJobs = readFileSync("src/app/admin/(protected)/jobs/page.tsx", "utf8");
+  assert.match(adminJobs, /job\.status === "failed" \|\| job\.status === "superseded"/u);
+});
 test("reader page binds exercise answers to the first exercise section only", () => {
   const src = readFileSync("src/app/courses/[id]/chapters/[chapterId]/page.tsx", "utf8");
   assert.match(src, /firstExerciseSectionIndex = sections\.findIndex/u);

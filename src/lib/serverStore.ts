@@ -1508,6 +1508,7 @@ function jobStatusRank(status: GenerationJob["status"]) {
     retrying: 2,
     running: 3,
     failed: 4,
+    superseded: 4,
     succeeded: 5,
   }[status];
 }
