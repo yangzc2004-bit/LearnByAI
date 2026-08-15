@@ -21,7 +21,7 @@ export function Navigation() {
     { label: "首页", href: "/" },
     { label: "课程", href: "/courses" },
     { label: "创建", href: "/create/mode" },
-    { label: "关于", href: "/about" },
+    { label: "模型设置", href: "/model" },
   ];
 
   const isActive = (href: string) =>

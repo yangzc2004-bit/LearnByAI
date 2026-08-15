@@ -34,7 +34,7 @@ export default function AccountLayout({ children }: { children: React.ReactNode 
         <div className="mb-8">
           <h1 className="font-mono text-2xl font-bold text-foreground">账户设置</h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            管理你的个人资料和模型设置。
+            管理你的个人资料，查看项目介绍。
           </p>
         </div>
 

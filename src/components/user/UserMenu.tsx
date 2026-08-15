@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ChevronDown, LogOut, Settings2, UserRound } from "lucide-react";
+import { ChevronDown, Info, LogOut, UserRound } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -75,9 +75,9 @@ export function UserMenu({ className, mobile = false }: UserMenuProps) {
           </Link>
         </DropdownMenuItem>
         <DropdownMenuItem asChild>
-          <Link href="/account/model" className="cursor-pointer">
-            <Settings2 size={16} />
-            模型设置
+          <Link href="/account/about" className="cursor-pointer">
+            <Info size={16} />
+            关于
           </Link>
         </DropdownMenuItem>
         <DropdownMenuSeparator />

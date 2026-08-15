@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Settings2, UserRound } from "lucide-react";
+import { Info, UserRound } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const ACCOUNT_NAV_ITEMS = [
   { href: "/account/profile", label: "个人资料", icon: UserRound },
-  { href: "/account/model", label: "模型设置", icon: Settings2 },
+  { href: "/account/about", label: "关于", icon: Info },
 ] as const;
 
 export function AccountNav() {
