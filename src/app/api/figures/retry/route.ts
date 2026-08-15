@@ -11,7 +11,7 @@ import {
 import { markdownToSections } from "@/lib/maol/integrator";
 import { parseModelOverridesFromHeaders } from "@/lib/modelOverrides";
 import { publicSafeErrorMessage } from "@/lib/publicSafeError";
-import { getServerCourse, saveServerCourse } from "@/lib/serverStore";
+import { CourseUpdateConflictError, getServerCourse, saveServerCourse } from "@/lib/serverStore";
 import { resolveModelOverrides } from "@/lib/userModelConfig";
 import type { Chapter, Course, FigurePlaceholder } from "@/lib/types";
 
@@ -101,6 +101,12 @@ export async function POST(request: Request) {
     }, request);
     return NextResponse.json({ course: savedCourse, chapter: nextChapter, asset });
   } catch (error) {
+    if (error instanceof CourseUpdateConflictError) {
+      return NextResponse.json(
+        { error: "课程已被其他操作更新，请刷新页面后重试。" },
+        { status: 409 },
+      );
+    }
     return NextResponse.json({ error: publicSafeErrorMessage(error, "Figure retry failed.") }, { status: 500 });
   }
 }
@@ -121,6 +127,12 @@ async function retryBookMap(
     }, request);
     return NextResponse.json({ course: savedCourse, asset: textbookMap });
   } catch (error) {
+    if (error instanceof CourseUpdateConflictError) {
+      return NextResponse.json(
+        { error: "课程已被其他操作更新，请刷新页面后重试。" },
+        { status: 409 },
+      );
+    }
     return NextResponse.json({ error: publicSafeErrorMessage(error, "Textbook map retry failed.") }, { status: 500 });
   }
 }

@@ -88,7 +88,8 @@ test("companion/answers CAS helpers route through the guarded cross-process RPC"
   assert.match(source, /throw new ChapterUpdateConflictError\(chapterId\)/u);
   assert.match(source, /expectedBodyHash: expectedContentHash/u, "CAS helpers must pass the expected hash");
   assert.match(source, /error instanceof ChapterUpdateConflictError/u, "CAS helpers must translate the conflict into applied:false");
-  assert.match(source, /body_hash: hashChapterContent\(getChapterBody\(chapter\)\)/u, "full course saves must maintain body_hash");
+  assert.match(source, /const newBodyHash = hashChapterContent\(getChapterBody\(chapter\)\)/u, "chapter updates must persist the new body hash");
+  assert.match(source, /new_body_hash: newBodyHash/u);
 });
 
 test("active-guide job conflict recovery covers companion-guide and legacy lecture types", () => {
@@ -109,8 +110,27 @@ test("guarded RPC is service-role-only and surgical in the schema", () => {
   const schema = readFileSync("supabase/schema.sql", "utf8");
   assert.match(schema, /create or replace function public\.apply_chapter_update_guarded\(/u);
   assert.match(schema, /jsonb_array_elements\(c\.payload->'chapters'\)/u, "course payload update must target the single chapter element");
+  assert.match(schema, /and course_id = target_course_id/u, "RPC must verify the chapter belongs to the course");
+  assert.match(schema, /new_title text/u);
+  assert.match(schema, /new_status text/u);
+  assert.match(schema, /new_order_index integer/u);
+  assert.match(schema, /version = current_version \+ 1/u, "chapter updates must increment the course version");
+  assert.match(schema, /delete from public\.sections\s+where chapter_id = target_chapter_id/u, "section mirror must be synced inside the RPC");
   assert.match(schema, /revoke execute on function public\.apply_chapter_update_guarded/u);
   assert.match(schema, /grant execute on function public\.apply_chapter_update_guarded\([^)]*\) to service_role/u);
+});
+
+test("whole-course writes use a version CAS and keep all mirrors in one transaction", () => {
+  const schema = readFileSync("supabase/schema.sql", "utf8");
+  assert.match(schema, /alter table public\.courses add column if not exists version integer not null default 1/u);
+  assert.match(schema, /create or replace function public\.save_course_guarded\(/u);
+  assert.match(schema, /current_version <> expected_version/u);
+  assert.match(schema, /with incoming_sections as/u, "sections mirror must be rebuilt inside save_course_guarded");
+  assert.match(schema, /with incoming_reports as/u, "chapter quality reports must be persisted inside save_course_guarded");
+
+  const source = readFileSync("src/lib/serverStore.ts", "utf8");
+  assert.match(source, /select\("payload, version"\)/u, "course reads must return the optimistic-lock version");
+  assert.match(source, /typeof savedVersion !== "number" \|\| savedVersion < 1/u);
 });
 
 test("TutorPanel composer is controlled and syncs with initialQuestion", () => {

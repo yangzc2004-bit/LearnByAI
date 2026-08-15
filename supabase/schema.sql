@@ -20,6 +20,7 @@ create table if not exists courses (
   topic text not null,
   goal text not null,
   payload jsonb not null,
+  version integer not null default 1,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -93,6 +94,11 @@ alter table annotations add column if not exists summary text;
 -- last write. apply_chapter_update_guarded refuses to overwrite a chapter
 -- whose body_hash no longer matches the writer's expectation.
 alter table chapters add column if not exists body_hash text;
+-- Course-level optimistic lock for whole-course writes. Every course/chapter
+-- mutation (save_course_guarded, apply_chapter_update_guarded) increments this
+-- version; stale whole-course snapshots are refused before they can clobber a
+-- fresher chapter payload or body_hash.
+alter table public.courses add column if not exists version integer not null default 1;
 
 -- Backfill body_hash for chapters persisted before the column existed (runs
 -- idempotently on every schema apply). Must mirror hashChapterContent in
@@ -509,53 +515,326 @@ returns text
 language sql
 stable
 as $$
-  select 'learnbyai-beta-2026-06-23-02'::text;
+  select 'learnbyai-beta-2026-06-23-03'::text;
 $$;
 
--- Cross-process chapter-write CAS. Replaces the old read-check-write pattern:
--- the web app and the generation worker are separate processes, so an
--- in-memory lock cannot guard them. This RPC runs in one transaction:
---   1. refuses to write when chapters.body_hash differs from the writer's
---      expectation (stale companion/answers writes turn into a supersede);
---   2. updates the chapter row with the new payload + body_hash;
+-- Defensive JSON coercion helpers used by the guarded RPCs. Invalid ids/numbers
+-- turn into null instead of aborting a transaction with a cast error.
+create or replace function public.try_uuid(value text)
+returns uuid
+language sql
+immutable
+as $$
+  select case
+    when value ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    then value::uuid
+    else null
+  end;
+$$;
+
+create or replace function public.try_int(value text)
+returns integer
+language sql
+immutable
+as $$
+  select case
+    when value ~ '^-?[0-9]+$' then value::integer
+    else null
+  end;
+$$;
+
+create or replace function public.try_timestamptz(value text)
+returns timestamptz
+language sql
+immutable
+as $$
+  select case
+    when value ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' then value::timestamptz
+    else null
+  end;
+$$;
+
+-- Whole-course write CAS. Replaces the old blind courses.upsert + chapter
+-- mirror rewrite, which could clobber a fresher chapter written by another
+-- process. Runs in one transaction:
+--   1. inserts a new course (version 1) or refuses an existing course when
+--      expected_version does not match the current version;
+--   2. increments courses.version;
+--   3. synchronizes chapters/sections mirrors and chapter quality reports
+--      from the course payload, so no mirror write happens after the CAS.
+create or replace function public.save_course_guarded(
+  target_course_id uuid,
+  target_user_id uuid,
+  expected_version integer,
+  course_payload jsonb,
+  new_topic text,
+  new_goal text,
+  new_created_at timestamptz,
+  new_updated_at timestamptz
+)
+returns integer
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  current_version integer;
+  next_version integer;
+  incoming_chapters jsonb := coalesce(course_payload->'chapters', '[]'::jsonb);
+begin
+  perform pg_advisory_xact_lock(hashtext(target_course_id::text)::bigint);
+
+  select c.version
+  into current_version
+  from public.courses c
+  where c.id = target_course_id
+  for update;
+
+  if current_version is null then
+    next_version := 1;
+    insert into public.courses (
+      id, user_id, topic, goal, payload, version, created_at, updated_at
+    )
+    values (
+      target_course_id,
+      target_user_id,
+      new_topic,
+      new_goal,
+      course_payload,
+      next_version,
+      new_created_at,
+      new_updated_at
+    );
+  elsif expected_version is null or current_version <> expected_version then
+    return -1;
+  else
+    next_version := current_version + 1;
+    update public.courses
+    set topic = new_topic,
+        goal = new_goal,
+        payload = course_payload,
+        version = next_version,
+        updated_at = new_updated_at
+    where id = target_course_id
+      and user_id = target_user_id;
+
+    if not found then
+      return -1;
+    end if;
+  end if;
+
+  -- Exact chapters mirror. body_hash is computed in SQL with the same
+  -- semantics as hashChapterContent/getChapterBody in the application.
+  with incoming as (
+    select
+      public.try_uuid(ch.val->>'id') as chapter_id,
+      coalesce(ch.val->>'title', '') as title,
+      coalesce(ch.val->>'status', 'pending') as status,
+      ch.ord - 1 as order_index,
+      ch.val as payload,
+      encode(digest(
+        coalesce(
+          ch.val->>'content',
+          (
+            select string_agg(section->>'content', E'\n\n' order by pos)
+            from jsonb_array_elements(ch.val->'sections') with ordinality as arr(section, pos)
+          ),
+          ''
+        ),
+        'sha256'
+      ), 'hex') as body_hash
+    from jsonb_array_elements(incoming_chapters) with ordinality as ch(val, ord)
+    where public.try_uuid(ch.val->>'id') is not null
+  )
+  insert into public.chapters (
+    id, course_id, user_id, title, status, order_index, payload, body_hash, updated_at
+  )
+  select
+    chapter_id,
+    target_course_id,
+    target_user_id,
+    title,
+    status,
+    order_index,
+    payload,
+    body_hash,
+    new_updated_at
+  from incoming
+  on conflict (id) do update set
+    course_id = excluded.course_id,
+    user_id = excluded.user_id,
+    title = excluded.title,
+    status = excluded.status,
+    order_index = excluded.order_index,
+    payload = excluded.payload,
+    body_hash = excluded.body_hash,
+    updated_at = excluded.updated_at
+  where public.chapters.course_id = target_course_id;
+
+  delete from public.chapters c
+  where c.course_id = target_course_id
+    and not exists (
+      select 1
+      from jsonb_array_elements(incoming_chapters) with ordinality as ch(val, ord)
+      where public.try_uuid(ch.val->>'id') = c.id
+    );
+
+  -- Exact sections mirror, derived from the chapters array.
+  with incoming_sections as (
+    select
+      public.try_uuid(ch.val->>'id') as chapter_id,
+      public.try_uuid(section.val->>'id') as section_id,
+      coalesce(section.val->>'title', '') as title,
+      coalesce(section.val->>'status', 'pending') as status,
+      coalesce(public.try_int(section.val->>'order'), section.ord - 1) as order_index,
+      section.val as payload
+    from jsonb_array_elements(incoming_chapters) with ordinality as ch(val, ch_ord)
+    cross join lateral jsonb_array_elements(
+      coalesce(ch.val->'sections', '[]'::jsonb)
+    ) with ordinality as section(val, ord)
+    where public.try_uuid(ch.val->>'id') is not null
+      and public.try_uuid(section.val->>'id') is not null
+  )
+  insert into public.sections (
+    id, chapter_id, course_id, user_id, title, status, order_index, payload, updated_at
+  )
+  select
+    section_id,
+    chapter_id,
+    target_course_id,
+    target_user_id,
+    title,
+    status,
+    order_index,
+    payload,
+    new_updated_at
+  from incoming_sections
+  on conflict (id) do update set
+    chapter_id = excluded.chapter_id,
+    course_id = excluded.course_id,
+    user_id = excluded.user_id,
+    title = excluded.title,
+    status = excluded.status,
+    order_index = excluded.order_index,
+    payload = excluded.payload,
+    updated_at = excluded.updated_at
+  where public.sections.course_id = target_course_id;
+
+  delete from public.sections s
+  where s.course_id = target_course_id
+    and not exists (
+      select 1
+      from jsonb_array_elements(incoming_chapters) with ordinality as ch(val, ch_ord)
+      cross join lateral jsonb_array_elements(
+        coalesce(ch.val->'sections', '[]'::jsonb)
+      ) with ordinality as section(val, ord)
+      where public.try_uuid(section.val->>'id') = s.id
+    );
+
+  -- Chapter quality reports carried inside the payload.
+  with incoming_reports as (
+    select
+      public.try_uuid(ch.val->'qualityReport'->>'id') as report_id,
+      coalesce(ch.val->'qualityReport'->>'targetType', 'chapter') as target_type,
+      coalesce(
+        public.try_uuid(ch.val->'qualityReport'->>'targetId'),
+        public.try_uuid(ch.val->>'id')
+      ) as target_id,
+      coalesce(public.try_int(ch.val->'qualityReport'->>'score'), 0) as score,
+      coalesce(ch.val->'qualityReport'->>'status', 'pending') as status,
+      ch.val->'qualityReport' as payload,
+      coalesce(
+        public.try_timestamptz(ch.val->'qualityReport'->>'createdAt'),
+        new_updated_at
+      ) as created_at
+    from jsonb_array_elements(incoming_chapters) as ch(val)
+    where public.try_uuid(ch.val->'qualityReport'->>'id') is not null
+  )
+  insert into public.quality_reports (
+    id, user_id, target_type, target_id, score, status, payload, created_at
+  )
+  select
+    report_id,
+    target_user_id,
+    target_type,
+    target_id,
+    score,
+    status,
+    payload,
+    created_at
+  from incoming_reports
+  on conflict (id) do update set
+    user_id = excluded.user_id,
+    target_type = excluded.target_type,
+    target_id = excluded.target_id,
+    score = excluded.score,
+    status = excluded.status,
+    payload = excluded.payload,
+    created_at = excluded.created_at
+  where public.quality_reports.user_id = target_user_id;
+
+  return next_version;
+end;
+$$;
+
+-- Cross-process chapter-write CAS. Runs in one transaction:
+--   1. refuses when the chapter does not belong to the course, the chapter is
+--      missing from the course payload, or chapters.body_hash differs from the
+--      writer's expectation (stale companion/answers writes are superseded);
+--   2. updates the chapter row (payload, body_hash AND title/status/order);
 --   3. surgically replaces ONLY that chapter's element inside the course
---      payload (jsonb_set by ordinal position) instead of rewriting the whole
---      course payload, so a concurrent chapter update is never clobbered.
+--      payload, increments courses.version, and syncs the chapter's sections
+--      mirror + quality report in the same transaction.
 create or replace function public.apply_chapter_update_guarded(
   target_course_id uuid,
   target_chapter_id uuid,
   expected_body_hash text,
   new_body_hash text,
   chapter_payload jsonb,
-  new_updated_at timestamptz
+  new_updated_at timestamptz,
+  new_title text,
+  new_status text,
+  new_order_index integer
 )
-returns boolean
+returns integer
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
   current_hash text;
+  chapter_user_id uuid;
   chapter_index bigint;
+  current_version integer;
+  quality_report_id uuid;
 begin
   perform pg_advisory_xact_lock(hashtext(target_chapter_id::text)::bigint);
 
-  select body_hash
-  into current_hash
+  select c.version
+  into current_version
+  from public.courses c
+  where c.id = target_course_id
+  for update;
+
+  if current_version is null then
+    return -1;
+  end if;
+
+  select body_hash, user_id
+  into current_hash, chapter_user_id
   from public.chapters
-  where id = target_chapter_id;
+  where id = target_chapter_id
+    and course_id = target_course_id;
+
+  if not found then
+    return -1;
+  end if;
 
   if current_hash is not null
      and expected_body_hash is not null
      and current_hash <> expected_body_hash then
-    return false;
+    return -1;
   end if;
-
-  update public.chapters
-  set payload = chapter_payload,
-      body_hash = new_body_hash,
-      updated_at = new_updated_at
-  where id = target_chapter_id;
 
   select pos - 1
   into chapter_index
@@ -565,18 +844,108 @@ begin
     and arr.ch->>'id' = target_chapter_id::text
   limit 1;
 
-  if chapter_index is not null then
-    update public.courses
-    set payload = jsonb_set(
-          payload,
-          array['chapters', chapter_index::text],
-          chapter_payload
-        ),
-        updated_at = new_updated_at
-    where id = target_course_id;
+  if chapter_index is null then
+    return -1;
   end if;
 
-  return true;
+  quality_report_id := public.try_uuid(chapter_payload->'qualityReport'->>'id');
+  if chapter_payload->'qualityReport' is not null and quality_report_id is null then
+    return -1;
+  end if;
+
+  update public.chapters
+  set title = coalesce(new_title, title),
+      status = coalesce(new_status, status),
+      order_index = coalesce(new_order_index, order_index),
+      payload = chapter_payload,
+      body_hash = new_body_hash,
+      updated_at = new_updated_at
+  where id = target_chapter_id
+    and course_id = target_course_id;
+
+  if not found then
+    return -1;
+  end if;
+
+  update public.courses
+  set payload = jsonb_set(
+        payload,
+        array['chapters', chapter_index::text],
+        chapter_payload
+      ),
+      version = current_version + 1,
+      updated_at = new_updated_at
+  where id = target_course_id;
+
+  if not found then
+    return -1;
+  end if;
+
+  -- Section mirror for exactly this chapter (delete first: regeneration must
+  -- never leave stale reader anchors behind).
+  delete from public.sections
+  where chapter_id = target_chapter_id
+    and course_id = target_course_id;
+
+  with incoming_sections as (
+    select
+      public.try_uuid(section.val->>'id') as section_id,
+      coalesce(section.val->>'title', '') as title,
+      coalesce(section.val->>'status', 'pending') as status,
+      coalesce(public.try_int(section.val->>'order'), section.ord - 1) as order_index,
+      section.val as payload
+    from jsonb_array_elements(
+      coalesce(chapter_payload->'sections', '[]'::jsonb)
+    ) with ordinality as section(val, ord)
+    where public.try_uuid(section.val->>'id') is not null
+  )
+  insert into public.sections (
+    id, chapter_id, course_id, user_id, title, status, order_index, payload, updated_at
+  )
+  select
+    section_id,
+    target_chapter_id,
+    target_course_id,
+    chapter_user_id,
+    title,
+    status,
+    order_index,
+    payload,
+    new_updated_at
+  from incoming_sections;
+
+  -- Chapter quality report carried inside the payload.
+  if quality_report_id is not null then
+    insert into public.quality_reports (
+      id, user_id, target_type, target_id, score, status, payload, created_at
+    )
+    select
+      quality_report_id,
+      chapter_user_id,
+      coalesce(chapter_payload->'qualityReport'->>'targetType', 'chapter'),
+      coalesce(
+        public.try_uuid(chapter_payload->'qualityReport'->>'targetId'),
+        target_chapter_id
+      ),
+      coalesce(public.try_int(chapter_payload->'qualityReport'->>'score'), 0),
+      coalesce(chapter_payload->'qualityReport'->>'status', 'pending'),
+      chapter_payload->'qualityReport',
+      coalesce(
+        public.try_timestamptz(chapter_payload->'qualityReport'->>'createdAt'),
+        new_updated_at
+      )
+    on conflict (id) do update set
+      user_id = excluded.user_id,
+      target_type = excluded.target_type,
+      target_id = excluded.target_id,
+      score = excluded.score,
+      status = excluded.status,
+      payload = excluded.payload,
+      created_at = excluded.created_at
+    where public.quality_reports.user_id = chapter_user_id;
+  end if;
+
+  return current_version + 1;
 end;
 $$;
 
@@ -584,13 +953,15 @@ revoke execute on function public.claim_generation_job(uuid, text, integer, inte
 revoke execute on function public.reserve_usage_quota(uuid, text, integer, timestamptz, uuid, integer) from public, anon, authenticated;
 revoke execute on function public.commit_usage_quota_reservation(uuid) from public, anon, authenticated;
 revoke execute on function public.release_usage_quota_reservation(uuid) from public, anon, authenticated;
-revoke execute on function public.apply_chapter_update_guarded(uuid, uuid, text, text, jsonb, timestamptz) from public, anon, authenticated;
+revoke execute on function public.save_course_guarded(uuid, uuid, integer, jsonb, text, text, timestamptz, timestamptz) from public, anon, authenticated;
+revoke execute on function public.apply_chapter_update_guarded(uuid, uuid, text, text, jsonb, timestamptz, text, text, integer) from public, anon, authenticated;
 
 grant execute on function public.claim_generation_job(uuid, text, integer, integer, integer) to service_role;
 grant execute on function public.reserve_usage_quota(uuid, text, integer, timestamptz, uuid, integer) to service_role;
 grant execute on function public.commit_usage_quota_reservation(uuid) to service_role;
 grant execute on function public.release_usage_quota_reservation(uuid) to service_role;
-grant execute on function public.apply_chapter_update_guarded(uuid, uuid, text, text, jsonb, timestamptz) to service_role;
+grant execute on function public.save_course_guarded(uuid, uuid, integer, jsonb, text, text, timestamptz, timestamptz) to service_role;
+grant execute on function public.apply_chapter_update_guarded(uuid, uuid, text, text, jsonb, timestamptz, text, text, integer) to service_role;
 
 create index if not exists generation_jobs_runnable_idx
   on generation_jobs (status, locked_until, created_at);

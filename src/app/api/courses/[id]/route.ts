@@ -5,7 +5,7 @@ import { runChapterGenerationJob } from "@/lib/generationRunner";
 import { createGenerationJob } from "@/lib/jobs";
 import { parseModelOverridesFromHeaders } from "@/lib/modelOverrides";
 import { publicGenerationJob } from "@/lib/publicGenerationJob";
-import { deleteServerCourse, getActiveServerGenerationJobForChapter, getServerCourse, saveServerCourse, saveServerGenerationJob, updateServerChapter } from "@/lib/serverStore";
+import { CourseUpdateConflictError, deleteServerCourse, getActiveServerGenerationJobForChapter, getServerCourse, saveServerCourse, saveServerGenerationJob, updateServerChapter } from "@/lib/serverStore";
 import { resolveModelOverrides } from "@/lib/userModelConfig";
 import { Chapter, Course, FigureMode, GenerationJob } from "@/lib/types";
 
@@ -45,12 +45,22 @@ export async function PATCH(
     if (!["model", "code", "off"].includes(String(body.figureMode))) {
       return NextResponse.json({ error: "figureMode must be model | code | off" }, { status: 400 });
     }
-    const updated = await saveServerCourse({
-      ...course,
-      figureMode: body.figureMode as FigureMode,
-      updatedAt: new Date().toISOString(),
-    }, request);
-    return NextResponse.json({ course: updated });
+    try {
+      const updated = await saveServerCourse({
+        ...course,
+        figureMode: body.figureMode as FigureMode,
+        updatedAt: new Date().toISOString(),
+      }, request);
+      return NextResponse.json({ course: updated });
+    } catch (error) {
+      if (error instanceof CourseUpdateConflictError) {
+        return NextResponse.json(
+          { error: "课程已被其他操作更新，请刷新页面后重试。" },
+          { status: 409 },
+        );
+      }
+      throw error;
+    }
   }
 
   return NextResponse.json({ error: "Nothing to update" }, { status: 400 });

@@ -9,6 +9,7 @@ import { parseModelOverridesFromHeaders } from "@/lib/modelOverrides";
 import { publicGenerationJob } from "@/lib/publicGenerationJob";
 import { safeErrorMessage } from "@/lib/safeError";
 import {
+  CourseUpdateConflictError,
   getActiveServerGenerationJobForChapter,
   getServerCourse,
   saveServerCourse,
@@ -103,7 +104,18 @@ export async function POST(
     updatedAt: new Date().toISOString(),
   };
 
-  const savedCourse = await saveServerCourse(courseToSave, request);
+  let savedCourse: Course;
+  try {
+    savedCourse = await saveServerCourse(courseToSave, request);
+  } catch (error) {
+    if (error instanceof CourseUpdateConflictError) {
+      return NextResponse.json(
+        { error: "课程已被其他操作更新，请刷新页面后重试。" },
+        { status: 409 },
+      );
+    }
+    throw error;
+  }
   const savedNewJobs = await saveServerGenerationJobs(newJobs, request);
   const jobs = [...existingJobs, ...savedNewJobs];
 

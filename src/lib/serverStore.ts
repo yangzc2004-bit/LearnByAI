@@ -50,6 +50,10 @@ type SupabaseResult = {
 };
 
 export async function saveServerCourse(course: Course, request?: Request) {
+  return withCourseUpdateLock(course.id, () => saveServerCourseLocked(course, request));
+}
+
+async function saveServerCourseLocked(course: Course, request?: Request) {
   const userId = await resolveUserId(request);
   const nextCourse = {
     ...course,
@@ -65,101 +69,32 @@ export async function saveServerCourse(course: Course, request?: Request) {
 
   if (!isUuid(nextCourse.id)) return publishSavedCourse(nextCourse);
 
-  await requireSupabaseWrite(
-    "Persist course",
-    () => supabase.from("courses").upsert({
-      id: nextCourse.id,
-      user_id: userId,
-      topic: nextCourse.topic,
-      goal: nextCourse.goal,
-      payload: canonicalizeCourseForStorage(nextCourse),
-      created_at: nextCourse.createdAt,
-      updated_at: nextCourse.updatedAt,
-    }),
-  );
+  // Whole-course write CAS. The old blind courses.upsert followed by chapter
+  // mirror rewrites could overwrite a fresher chapter payload (and its
+  // body_hash) with an older course snapshot from another process. The RPC
+  // compares courses.version, increments it, and updates course payload plus
+  // chapter/section/quality-report mirrors in ONE transaction.
+  const { data: savedVersion, error } = await supabase.rpc("save_course_guarded", {
+    target_course_id: nextCourse.id,
+    target_user_id: userId,
+    expected_version: nextCourse.version ?? null,
+    course_payload: canonicalizeCourseForStorage(nextCourse),
+    new_topic: nextCourse.topic,
+    new_goal: nextCourse.goal,
+    new_created_at: nextCourse.createdAt,
+    new_updated_at: nextCourse.updatedAt,
+  });
+  assertSupabaseNoError("Persist course", error);
 
-  // Remove chapter rows that are no longer in the course payload so the
-  // chapters table stays an exact mirror (course summaries count from it).
-  const keptChapterIds = nextCourse.chapters.map((chapter) => chapter.id).filter(isUuid);
-  await requireSupabaseWrite(
-    "Prune stale chapters",
-    () => keptChapterIds.length
-      ? supabase.from("chapters").delete().eq("course_id", nextCourse.id).not("id", "in", `(${keptChapterIds.join(",")})`)
-      : supabase.from("chapters").delete().eq("course_id", nextCourse.id),
-  );
+  if (typeof savedVersion !== "number" || savedVersion < 1) {
+    throw new CourseUpdateConflictError(nextCourse.id);
+  }
 
-  await Promise.all(
-    nextCourse.chapters
-      .filter((chapter) => isUuid(chapter.id))
-      .map((chapter, index) =>
-        requireSupabaseWrite(
-          "Persist chapter",
-          () => supabase.from("chapters").upsert({
-            id: chapter.id,
-            course_id: nextCourse.id,
-            user_id: userId,
-            title: chapter.title,
-            status: chapter.status ?? "pending",
-            order_index: index,
-            payload: canonicalizeChapterForStorage(chapter),
-            body_hash: hashChapterContent(getChapterBody(chapter)),
-            updated_at: nextCourse.updatedAt,
-          }),
-        ),
-      ),
-  );
+  const savedCourse = { ...nextCourse, version: savedVersion };
+  localCourses.set(savedCourse.id, savedCourse);
+  await persistLocalStore();
 
-  await Promise.all(
-    nextCourse.chapters.flatMap((chapter) => {
-      const qualityReport = chapter.qualityReport;
-      return [
-      qualityReport && isUuid(qualityReport.id) && isUuid(qualityReport.targetId)
-        ? requireSupabaseWrite(
-            "Persist quality report",
-            () => supabase.from("quality_reports").upsert({
-              id: qualityReport.id,
-              user_id: userId,
-              target_type: qualityReport.targetType,
-              target_id: qualityReport.targetId,
-              score: qualityReport.score,
-              status: qualityReport.status,
-              payload: qualityReport,
-              created_at: qualityReport.createdAt,
-            }),
-          )
-        : Promise.resolve(),
-      // Delete stale sections for this chapter before inserting the new set to avoid duplicates
-      ...(chapter.sections && chapter.sections.length > 0 && isUuid(chapter.id)
-        ? [
-            requireSupabaseWrite(
-              "Delete stale sections",
-              () => supabase.from("sections").delete().eq("chapter_id", chapter.id),
-            ).catch(() => {
-              // Ignore delete failure so upserts below still attempt to overwrite by id
-            }),
-          ]
-        : []),
-      ...(chapter.sections ?? []).filter((section) => isUuid(section.id) && isUuid(section.chapterId)).map((section) =>
-        requireSupabaseWrite(
-          "Persist section",
-          () => supabase.from("sections").upsert({
-            id: section.id,
-            chapter_id: chapter.id,
-            course_id: nextCourse.id,
-            user_id: userId,
-            title: section.title,
-            status: section.status,
-            order_index: section.order,
-            payload: section,
-            updated_at: nextCourse.updatedAt,
-          }),
-        ),
-      ),
-    ];
-    }),
-  );
-
-  return publishSavedCourse(nextCourse);
+  return publishSavedCourse(savedCourse);
 }
 
 /**
@@ -222,13 +157,16 @@ export async function getServerCourse(id: string, request?: Request) {
   if (supabase && isUuid(userId)) {
     const { data, error } = await supabase
       .from("courses")
-      .select("payload")
+      .select("payload, version")
       .eq("id", id)
       .eq("user_id", userId)
       .maybeSingle();
 
     assertSupabaseNoError("Read course", error);
-    if (data?.payload) return normalizeCourseRead(data.payload as Course);
+    if (data?.payload) {
+      const row = data as { payload: Course; version: number };
+      return normalizeCourseRead({ ...row.payload, version: row.version });
+    }
     return undefined;
   }
 
@@ -668,7 +606,9 @@ function canonicalizeChapterForStorage(chapter: Chapter): Chapter {
 }
 
 function canonicalizeCourseForStorage(course: Course): Course {
-  return { ...course, chapters: course.chapters.map(canonicalizeChapterForStorage) };
+  const storage: Course = { ...course, chapters: course.chapters.map(canonicalizeChapterForStorage) };
+  delete storage.version;
+  return storage;
 }
 
 async function saveServerChapterUpdate(
@@ -698,66 +638,33 @@ async function saveServerChapterUpdate(
   // Cross-process CAS: the web app and the generation worker are separate
   // processes, so the in-memory course lock cannot guard this write. The RPC
   // refuses to overwrite a chapter whose body_hash drifted from the writer's
-  // expectation (stale companion/answers writes), and surgically replaces only
-  // this chapter's element inside the course payload instead of rewriting the
-  // whole payload — a concurrent chapter write can never be clobbered.
+  // expectation (stale companion/answers writes), synchronizes the chapter
+  // relation fields (title/status/order), surgically replaces only this
+  // chapter's element inside the course payload, increments courses.version,
+  // and updates the section mirror + quality report in the same transaction.
   const storedChapter = canonicalizeChapterForStorage(chapter);
   const newBodyHash = hashChapterContent(getChapterBody(chapter));
-  const { data: applied, error: rpcError } = await supabase.rpc("apply_chapter_update_guarded", {
+  const { data: appliedVersion, error: rpcError } = await supabase.rpc("apply_chapter_update_guarded", {
     target_course_id: nextCourse.id,
     target_chapter_id: chapter.id,
     expected_body_hash: options?.expectedBodyHash ?? null,
     new_body_hash: newBodyHash,
     chapter_payload: storedChapter,
     new_updated_at: nextCourse.updatedAt,
+    new_title: chapter.title,
+    new_status: chapter.status ?? "pending",
+    new_order_index: chapterIndex,
   });
   assertSupabaseNoError("Persist chapter update", rpcError);
-  if (applied === false) {
+  if (typeof appliedVersion !== "number" || appliedVersion < 1) {
     throw new ChapterUpdateConflictError(chapterId);
   }
 
-  const qualityReport = chapter.qualityReport;
-  if (qualityReport && isUuid(qualityReport.id) && isUuid(qualityReport.targetId)) {
-    await requireSupabaseWrite(
-      "Persist quality report",
-      () => supabase.from("quality_reports").upsert({
-        id: qualityReport.id,
-        user_id: userId,
-        target_type: qualityReport.targetType,
-        target_id: qualityReport.targetId,
-        score: qualityReport.score,
-        status: qualityReport.status,
-        payload: qualityReport,
-        created_at: qualityReport.createdAt,
-      }),
-    );
-  }
+  const savedCourse = { ...nextCourse, version: appliedVersion };
+  localCourses.set(savedCourse.id, savedCourse);
+  await persistLocalStore();
 
-  // A chapter update owns its section mirror. Delete first even when the new
-  // section list is empty so regeneration cannot leave stale reader anchors.
-  await requireSupabaseWrite(
-    "Delete stale sections",
-    () => supabase.from("sections").delete().eq("chapter_id", chapter.id),
-  );
-  for (const section of chapter.sections ?? []) {
-    if (!isUuid(section.id) || !isUuid(section.chapterId)) continue;
-    await requireSupabaseWrite(
-      "Persist section",
-      () => supabase.from("sections").upsert({
-        id: section.id,
-        chapter_id: chapter.id,
-        course_id: nextCourse.id,
-        user_id: userId,
-        title: section.title,
-        status: section.status,
-        order_index: section.order,
-        payload: section,
-        updated_at: nextCourse.updatedAt,
-      }),
-    );
-  }
-
-  return publishSavedCourse(nextCourse);
+  return publishSavedCourse(savedCourse);
 }
 
 /**
@@ -768,6 +675,17 @@ export class ChapterUpdateConflictError extends Error {
   constructor(public readonly chapterId: string) {
     super(`Chapter ${chapterId} body hash changed; the guarded update was refused.`);
     this.name = "ChapterUpdateConflictError";
+  }
+}
+
+/**
+ * Thrown when save_course_guarded refused a whole-course write because the
+ * snapshot's courses.version no longer matches the current row.
+ */
+export class CourseUpdateConflictError extends Error {
+  constructor(public readonly courseId: string) {
+    super(`Course ${courseId} version changed; the guarded whole-course write was refused.`);
+    this.name = "CourseUpdateConflictError";
   }
 }
 

@@ -338,6 +338,9 @@ export type Course = {
   createdAt: string;
   updatedAt?: string;
   generationJobId?: string;
+  /** Course-row optimistic-lock version. Read with the payload and required
+   *  by saveServerCourse; stale snapshots are refused by the DB CAS. */
+  version?: number;
 };
 
 export type QualityIssue = {

@@ -3,6 +3,7 @@ import { requireApiUser } from "@/lib/apiAuth";
 import { reapplyTextRevisionInCourse, restoreChapterSnapshot, RevisionConflictError } from "@/lib/revisionApply";
 import { safeErrorMessage } from "@/lib/safeError";
 import {
+  CourseUpdateConflictError,
   getServerCourse,
   getServerRevision,
   listServerRevisions,
@@ -85,7 +86,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   } catch (error) {
     return NextResponse.json(
       { error: safeErrorMessage(error, "Reapply revision failed.") },
-      { status: error instanceof RevisionConflictError ? 409 : 500 },
+      { status: error instanceof RevisionConflictError || error instanceof CourseUpdateConflictError ? 409 : 500 },
     );
   }
 }

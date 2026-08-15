@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireApiUser } from "@/lib/apiAuth";
 import { applyTextRevisionToCourse, RevisionConflictError } from "@/lib/revisionApply";
 import { safeErrorMessage } from "@/lib/safeError";
-import { getServerCourse, getServerRevision, saveServerCourse, updateServerRevision } from "@/lib/serverStore";
+import { CourseUpdateConflictError, getServerCourse, getServerRevision, saveServerCourse, updateServerRevision } from "@/lib/serverStore";
 
 export async function POST(request: Request) {
   const auth = await requireApiUser(request);
@@ -66,7 +66,7 @@ export async function POST(request: Request) {
   } catch (error) {
     return NextResponse.json(
       { error: safeErrorMessage(error, "Apply revision failed.") },
-      { status: error instanceof RevisionConflictError ? 409 : 500 },
+      { status: error instanceof RevisionConflictError || error instanceof CourseUpdateConflictError ? 409 : 500 },
     );
   }
 }

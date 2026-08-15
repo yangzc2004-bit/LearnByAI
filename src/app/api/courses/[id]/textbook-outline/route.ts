@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireApiUser } from "@/lib/apiAuth";
 import { normalizeTextbookMeta, validateTextbookMeta } from "@/lib/textbookOutline";
-import { getServerCourse, saveServerCourse } from "@/lib/serverStore";
+import { CourseUpdateConflictError, getServerCourse, saveServerCourse } from "@/lib/serverStore";
 import type { TextbookMeta } from "@/lib/types";
 
 export async function GET(
@@ -40,19 +40,29 @@ export async function PUT(
   const validation = validateTextbookMeta(textbookMeta);
   if (validation) return NextResponse.json({ error: validation }, { status: 400 });
 
-  const saved = await saveServerCourse({
-    ...course,
-    textbookMeta: {
-      ...textbookMeta,
-      // "confirmed" is only ever minted by the confirm endpoint (which builds
-      // contracts and queues chapter jobs). A PUT can keep an already-confirmed
-      // course confirmed, but a client-asserted "confirmed" on a draft would
-      // skip that whole pipeline — so derive from server state, not the body.
-      outlineStatus: course.textbookMeta?.outlineStatus === "confirmed" ? "confirmed" : "ready",
-    },
-  }, request);
+  try {
+    const saved = await saveServerCourse({
+      ...course,
+      textbookMeta: {
+        ...textbookMeta,
+        // "confirmed" is only ever minted by the confirm endpoint (which builds
+        // contracts and queues chapter jobs). A PUT can keep an already-confirmed
+        // course confirmed, but a client-asserted "confirmed" on a draft would
+        // skip that whole pipeline — so derive from server state, not the body.
+        outlineStatus: course.textbookMeta?.outlineStatus === "confirmed" ? "confirmed" : "ready",
+      },
+    }, request);
 
-  return NextResponse.json({ course: saved, textbookMeta: saved.textbookMeta });
+    return NextResponse.json({ course: saved, textbookMeta: saved.textbookMeta });
+  } catch (error) {
+    if (error instanceof CourseUpdateConflictError) {
+      return NextResponse.json(
+        { error: "课程已被其他操作更新，请刷新页面后重试。" },
+        { status: 409 },
+      );
+    }
+    throw error;
+  }
 }
 
 

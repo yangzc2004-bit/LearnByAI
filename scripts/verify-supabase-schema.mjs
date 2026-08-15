@@ -4,7 +4,7 @@ import { join } from "node:path";
 const schemaPath = join(process.cwd(), "supabase", "schema.sql");
 const rawSql = readFileSync(schemaPath, "utf8");
 const compactSql = rawSql.toLowerCase().replace(/\s+/gu, " ");
-const expectedSchemaVersion = "learnbyai-beta-2026-06-23-02";
+const expectedSchemaVersion = "learnbyai-beta-2026-06-23-03";
 
 const tables = [
   "profiles",
@@ -59,6 +59,8 @@ const requiredSnippets = [
   "attempts integer not null default 0",
   "create or replace function public.handle_new_user()",
   "create or replace function public.claim_generation_job(",
+  "create or replace function public.try_uuid(",
+  "create or replace function public.save_course_guarded(",
   "create or replace function public.apply_chapter_update_guarded(",
   "create or replace function public.reserve_usage_quota(",
   "create or replace function public.commit_usage_quota_reservation(",
@@ -68,12 +70,14 @@ const requiredSnippets = [
   "revoke execute on function public.reserve_usage_quota(uuid, text, integer, timestamptz, uuid, integer) from public, anon, authenticated",
   "revoke execute on function public.commit_usage_quota_reservation(uuid) from public, anon, authenticated",
   "revoke execute on function public.release_usage_quota_reservation(uuid) from public, anon, authenticated",
-  "revoke execute on function public.apply_chapter_update_guarded(uuid, uuid, text, text, jsonb, timestamptz) from public, anon, authenticated",
+  "revoke execute on function public.save_course_guarded(uuid, uuid, integer, jsonb, text, text, timestamptz, timestamptz) from public, anon, authenticated",
+  "revoke execute on function public.apply_chapter_update_guarded(uuid, uuid, text, text, jsonb, timestamptz, text, text, integer) from public, anon, authenticated",
   "grant execute on function public.claim_generation_job(uuid, text, integer, integer, integer) to service_role",
   "grant execute on function public.reserve_usage_quota(uuid, text, integer, timestamptz, uuid, integer) to service_role",
   "grant execute on function public.commit_usage_quota_reservation(uuid) to service_role",
   "grant execute on function public.release_usage_quota_reservation(uuid) to service_role",
-  "grant execute on function public.apply_chapter_update_guarded(uuid, uuid, text, text, jsonb, timestamptz) to service_role",
+  "grant execute on function public.save_course_guarded(uuid, uuid, integer, jsonb, text, text, timestamptz, timestamptz) to service_role",
+  "grant execute on function public.apply_chapter_update_guarded(uuid, uuid, text, text, jsonb, timestamptz, text, text, integer) to service_role",
   "create or replace function public.learnbyai_schema_version()",
   `select '${expectedSchemaVersion}'::text`,
   "status in ('pending', 'queued', 'retrying')",
