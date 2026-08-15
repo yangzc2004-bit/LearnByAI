@@ -1,1 +1,1 @@
-export const LEARNBYAI_SCHEMA_VERSION = "learnbyai-beta-2026-06-23-02";
+export const LEARNBYAI_SCHEMA_VERSION = "learnbyai-beta-2026-06-23-03";
