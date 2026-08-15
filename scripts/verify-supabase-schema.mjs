@@ -43,6 +43,8 @@ const requiredSnippets = [
   "alter table annotations add column if not exists summary text",
   "alter table annotations alter column selected_text drop not null",
   "alter table chapters add column if not exists body_hash text",
+  "create extension if not exists pgcrypto",
+  "encode(digest(",
   'create policy "users can read own jobs"',
   'create policy "users can read own quality reports"',
   'create policy "users can read own exports"',

@@ -85,6 +85,25 @@ alter table annotations add column if not exists summary text;
 -- whose body_hash no longer matches the writer's expectation.
 alter table chapters add column if not exists body_hash text;
 
+-- Backfill body_hash for chapters persisted before the column existed (runs
+-- idempotently on every schema apply). Must mirror hashChapterContent in
+-- src/lib/chapterContent.ts: sha256(content), or sha256(sections joined by
+-- "\n\n" in array order), or sha256("") when neither exists.
+create extension if not exists pgcrypto;
+update public.chapters
+set body_hash = encode(digest(
+      coalesce(
+        payload->>'content',
+        (
+          select string_agg(section->>'content', E'\n\n' order by pos)
+          from jsonb_array_elements(payload->'sections') with ordinality as arr(section, pos)
+        ),
+        ''
+      ),
+      'sha256'
+    ), 'hex')
+where body_hash is null;
+
 create table if not exists generation_jobs (
   id uuid primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
