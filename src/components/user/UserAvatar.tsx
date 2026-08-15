@@ -29,6 +29,7 @@ export function UserAvatar({
     <Avatar className={cn("size-8", className)}>
       {source ? (
         <AvatarImage
+          key={source}
           src={source}
           alt={displayName || email || "用户头像"}
           className={cn("object-cover", imageClassName)}

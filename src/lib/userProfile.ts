@@ -31,6 +31,34 @@ export type UserProfileUpdateResult =
 
 export type UserAvatarUploadResult = UserProfileUpdateResult;
 
+/**
+ * The service client talks to Supabase through the internal URL
+ * (SUPABASE_SERVICE_URL, e.g. http://127.0.0.1:8000). Avatar URLs must never
+ * leak that address to browsers; rebuild them from the public base URL.
+ */
+function publicStorageBaseUrl() {
+  const configured =
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_APP_URL ||
+    process.env.APP_BASE_URL;
+  if (!configured) return undefined;
+  return configured.replace(/\/+$/, "");
+}
+
+function buildPublicAvatarUrl(path: string) {
+  const base = publicStorageBaseUrl();
+  if (!base) return undefined;
+  return `${base}/storage/v1/object/public/${AVATAR_BUCKET}/${path}`;
+}
+
+/** Rewrite legacy/internal avatar URLs (e.g. 127.0.0.1:8000) to the public host. */
+function normalizeAvatarUrl(url: string | null | undefined) {
+  if (!url) return null;
+  const path = avatarStoragePathFromUrl(url);
+  if (!path) return url;
+  return buildPublicAvatarUrl(path) ?? url;
+}
+
 export async function getUserProfile(userId: string): Promise<UserProfile | null> {
   const supabase = createSupabaseServiceClient();
   if (!supabase) return null;
@@ -122,8 +150,7 @@ export async function uploadUserAvatar(
     return { ok: false, status: 500, message: "头像上传失败，请稍后重试。" };
   }
 
-  const { data: publicUrl } = supabase.storage.from(AVATAR_BUCKET).getPublicUrl(path);
-  const avatarUrl = publicUrl?.publicUrl;
+  const avatarUrl = buildPublicAvatarUrl(path);
   if (!avatarUrl) {
     await supabase.storage.from(AVATAR_BUCKET).remove([path]).catch(() => undefined);
     return { ok: false, status: 500, message: "头像地址生成失败，请稍后重试。" };
@@ -212,7 +239,7 @@ function profileFromRow(row: ProfileRow): UserProfile {
     email: row.email ?? null,
     displayName: row.display_name ?? null,
     bio: row.bio ?? null,
-    avatarUrl: row.avatar_url ?? null,
+    avatarUrl: normalizeAvatarUrl(row.avatar_url),
     createdAt: row.created_at,
     updatedAt: row.updated_at ?? row.created_at,
   };

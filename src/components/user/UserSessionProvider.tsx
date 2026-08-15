@@ -40,6 +40,7 @@ export function UserSessionProvider({ children }: { children: React.ReactNode })
     try {
       const response = await fetch("/api/user/profile", {
         headers: { authorization: `Bearer ${token}` },
+        cache: "no-store",
       });
       if (!response.ok) {
         setProfileState(null);
