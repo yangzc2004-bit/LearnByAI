@@ -2,18 +2,16 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { BookOpen, LogOut, Menu, Sparkles, X } from "lucide-react";
-import { ModelSettings } from "./ModelSettings";
+import { usePathname } from "next/navigation";
+import { BookOpen, Menu, Sparkles, X } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
-import { useUser } from "@/lib/hooks/useUser";
-import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
+import { UserMenu } from "./user/UserMenu";
+import { useUserSession } from "./user/UserSessionProvider";
 
 export function Navigation() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const pathname = usePathname();
-  const router = useRouter();
-  const user = useUser();
+  const { user } = useUserSession();
 
   if (pathname?.includes("/chapters/")) {
     return null;
@@ -28,14 +26,6 @@ export function Navigation() {
 
   const isActive = (href: string) =>
     pathname === href || (pathname?.startsWith(href) && href !== "/");
-
-  async function logout() {
-    const supabase = createSupabaseBrowserClient();
-    await supabase?.auth.signOut();
-    setMobileOpen(false);
-    router.replace("/");
-    router.refresh();
-  }
 
   return (
     <nav className="fixed left-0 right-0 top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
@@ -62,16 +52,7 @@ export function Navigation() {
             </Link>
           ))}
           {user === undefined ? null : user ? (
-            <div className="flex items-center gap-2">
-              <span className="max-w-[140px] truncate font-mono text-xs text-muted-foreground" title={user.email ?? ""}>{user.email}</span>
-              <button
-                type="button"
-                onClick={() => void logout()}
-                className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 font-mono text-xs text-muted-foreground transition-colors hover:text-foreground"
-              >
-                <LogOut size={13} /> 退出
-              </button>
-            </div>
+            <UserMenu />
           ) : (
             <Link
               href="/login"
@@ -80,10 +61,7 @@ export function Navigation() {
               登录 / 注册
             </Link>
           )}
-          <div className="ml-2 flex items-center gap-1">
-            <ModelSettings showLabel />
-            <ThemeToggle />
-          </div>
+          <ThemeToggle />
         </div>
 
         <button
@@ -116,15 +94,8 @@ export function Navigation() {
               </Link>
             ))}
             {user ? (
-              <div className="flex items-center justify-between border-t border-border/50 pt-3">
-                <span className="max-w-[180px] truncate font-mono text-xs text-muted-foreground">{user.email}</span>
-                <button
-                  type="button"
-                  onClick={() => void logout()}
-                  className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 font-mono text-xs text-muted-foreground"
-                >
-                  <LogOut size={13} /> 退出
-                </button>
+              <div className="border-t border-border/50 pt-3">
+                <UserMenu mobile />
               </div>
             ) : user === null ? (
               <Link
@@ -136,10 +107,7 @@ export function Navigation() {
               </Link>
             ) : null}
             <div className="border-t border-border/50 pt-4">
-              <div className="flex items-center gap-2">
-                <ModelSettings size="icon" />
-                <ThemeToggle />
-              </div>
+              <ThemeToggle />
             </div>
           </div>
         </div>

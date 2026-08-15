@@ -5,6 +5,7 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { AppShell } from "@/components/AppShell";
 import { UserModelConfigSync } from "@/components/UserModelConfigSync";
+import { UserSessionProvider } from "@/components/user/UserSessionProvider";
 import { Toaster } from "@/components/ui/sonner";
 
 const inter = Inter({
@@ -37,9 +38,11 @@ export default function RootLayout({
     <html lang="zh-CN" suppressHydrationWarning className={`${inter.variable} ${outfit.variable} ${jbMono.variable}`}>
       <body className="font-sans antialiased">
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-          <AppShell>{children}</AppShell>
-          <UserModelConfigSync />
-          <Toaster position="top-center" richColors closeButton />
+          <UserSessionProvider>
+            <AppShell>{children}</AppShell>
+            <UserModelConfigSync />
+            <Toaster position="top-center" richColors closeButton />
+          </UserSessionProvider>
         </ThemeProvider>
       </body>
     </html>

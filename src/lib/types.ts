@@ -538,3 +538,13 @@ export type ChapterGenerateResponse = {
   exerciseAnswers?: ExerciseAnswer[];
   job?: GenerationJob;
 };
+
+export type UserProfile = {
+  id: string;
+  email: string | null;
+  displayName: string | null;
+  bio: string | null;
+  avatarUrl: string | null;
+  createdAt: string;
+  updatedAt: string;
+};

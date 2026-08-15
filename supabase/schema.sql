@@ -2,8 +2,17 @@ create table if not exists profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   email text,
   model_config jsonb,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
+
+-- User profile additions (display name, bio, public avatar). Kept as nullable
+-- columns so applying this migration to an existing database is a no-op schema
+-- change with zero data backfill required.
+alter table public.profiles add column if not exists display_name text;
+alter table public.profiles add column if not exists bio text;
+alter table public.profiles add column if not exists avatar_url text;
+alter table public.profiles add column if not exists updated_at timestamptz not null default now();
 
 create table if not exists courses (
   id uuid primary key,
@@ -268,13 +277,39 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  initial_display_name text;
 begin
-  insert into public.profiles (id, email)
-  values (new.id, new.email)
+  initial_display_name := nullif(
+    trim(coalesce(
+      new.raw_user_meta_data ->> 'name',
+      new.raw_user_meta_data ->> 'full_name',
+      ''
+    )),
+    ''
+  );
+
+  insert into public.profiles (id, email, display_name)
+  values (new.id, new.email, initial_display_name)
   on conflict (id) do update set email = excluded.email;
   return new;
 end;
 $$;
+
+create or replace function public.set_profile_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists profiles_set_updated_at on public.profiles;
+create trigger profiles_set_updated_at
+  before update on public.profiles
+  for each row execute function public.set_profile_updated_at();
 
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
@@ -639,4 +674,44 @@ create policy "Users can read own export objects"
   using (
     bucket_id = 'learnbyai-exports'
     and auth.uid()::text = (storage.foldername(name))[1]
+  );
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'learnbyai-avatars',
+  'learnbyai-avatars',
+  true,
+  5242880,
+  array['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif']
+)
+on conflict (id) do update set
+  public = excluded.public,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+
+-- Avatar objects live under {userId}/avatar-*. Service-role routes perform the
+-- upload, but keep these defensive RLS policies so an authenticated client can
+-- never write into another user's avatar folder.
+drop policy if exists "Users can upload own avatar" on storage.objects;
+create policy "Users can upload own avatar"
+  on storage.objects for insert
+  with check (
+    bucket_id = 'learnbyai-avatars'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+drop policy if exists "Users can update own avatar" on storage.objects;
+create policy "Users can update own avatar"
+  on storage.objects for update
+  using (
+    bucket_id = 'learnbyai-avatars'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+drop policy if exists "Users can delete own avatar" on storage.objects;
+create policy "Users can delete own avatar"
+  on storage.objects for delete
+  using (
+    bucket_id = 'learnbyai-avatars'
+    and (storage.foldername(name))[1] = auth.uid()::text
   );
