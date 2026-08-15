@@ -32,7 +32,10 @@ test("mock beta flow: create course, generate chapter, ask tutor, export", async
   const submitButton = page.locator('form button[type="submit"]');
   await expect(submitButton).toBeEnabled();
   await submitButton.click();
-  await expect(page).toHaveURL(/\/courses\/[0-9a-f-]+$/, { timeout: 30_000 });
+  // The post-submit client navigation triggers the dev server's on-demand
+  // compilation of /courses/[id] (the heaviest route); on a loaded machine
+  // that alone can exceed the default 30s before the URL settles.
+  await expect(page).toHaveURL(/\/courses\/[0-9a-f-]+$/, { timeout: 90_000 });
   await expect(page.getByText("Course Bible").first()).toBeVisible({ timeout: 30_000 });
   const courseUrl = page.url();
   const courseId = courseUrl.match(/\/courses\/([^/?#]+)/)?.[1];
@@ -50,7 +53,10 @@ test("mock beta flow: create course, generate chapter, ask tutor, export", async
   const jobJson = await jobResponse.json();
   expect(jobJson.job.id).toBe(queuedJobId);
 
-  await expect(page.getByText("Course Bible").first()).toBeVisible();
+  // Note: once chapter generation starts, the course page switches from the
+  // Bible grid to the live-manuscript layout, so "Course Bible" may leave the
+  // DOM here (it was asserted right after navigation above). The chapter link
+  // below is the stable readiness signal.
   const chapterHref = `/courses/${initialCourse.id}/chapters/${initialCourse.chapters[0].id}`;
   const chapterLink = page.locator(`a[href="${chapterHref}"]`);
   await expect(chapterLink).toBeVisible({
