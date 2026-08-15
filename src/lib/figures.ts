@@ -231,12 +231,7 @@ export async function createTextbookMapFigure(course: Course, overrides?: ModelO
   const chapterNames = course.chapters.map((chapter, index) => `${index + 1}. ${chapter.title}`).join("；");
   const placeholder: FigurePlaceholder = {
     caption,
-    prompt:
-      `Create a clean vertical textbook structure map titled 《${course.textbookMeta?.title ?? course.topic}》. ` +
-      `Render every chapter as a rounded box connected by arrows in the exact order below. ` +
-      `Each box MUST contain the exact simplified-Chinese chapter title listed next to its number. ` +
-      `Render all of the listed Chinese text clearly inside the image; do not omit, abbreviate, or paraphrase any label. ` +
-      `Chapter list:\n${chapterNames}`,
+    prompt: `为《${course.textbookMeta?.title ?? course.topic}》绘制全书结构地图，展示章节之间的学习路径：${chapterNames}`,
     diagramSpec: chapterNames,
     textLabelsAllowed: true,
   };
@@ -367,9 +362,8 @@ async function generateModelFigure(placeholder: FigurePlaceholder, overrides?: M
     [
       "Create a clean academic textbook illustration.",
       "White background, muted palette, precise layout, no marketing poster style, no watermark.",
-      "STRICT TEXT RULE: never draw sentences, titles, captions or captions inside the image. At most 2-6 character short labels.",
-      "The caption below the image is typeset separately — do not duplicate it inside the artwork.",
-      `Caption (for context only, do not draw it): ${placeholder.caption}`,
+      "Use short simplified-Chinese labels only when helpful; avoid long sentences inside the image.",
+      `Caption: ${placeholder.caption}`,
       `Content intent: ${placeholder.prompt}`,
       placeholder.diagramSpec ? `Diagram specification: ${placeholder.diagramSpec}` : "",
     ].filter(Boolean).join("\n"),
