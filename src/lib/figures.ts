@@ -231,7 +231,12 @@ export async function createTextbookMapFigure(course: Course, overrides?: ModelO
   const chapterNames = course.chapters.map((chapter, index) => `${index + 1}. ${chapter.title}`).join("；");
   const placeholder: FigurePlaceholder = {
     caption,
-    prompt: `为《${course.textbookMeta?.title ?? course.topic}》绘制全书结构地图，展示章节之间的学习路径：${chapterNames}`,
+    prompt:
+      `Create a clean vertical textbook structure map titled 《${course.textbookMeta?.title ?? course.topic}》. ` +
+      `Render every chapter as a rounded box connected by arrows in the exact order below. ` +
+      `Each box MUST contain the exact simplified-Chinese chapter title listed next to its number. ` +
+      `Render all of the listed Chinese text clearly inside the image; do not omit, abbreviate, or paraphrase any label. ` +
+      `Chapter list:\n${chapterNames}`,
     diagramSpec: chapterNames,
     textLabelsAllowed: true,
   };
