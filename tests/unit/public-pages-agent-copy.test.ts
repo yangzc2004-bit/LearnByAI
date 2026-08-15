@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 test("public pages describe the real seven agents without a fake gatherer", () => {
   const home = readFileSync("src/app/page.tsx", "utf8");
-  const about = readFileSync("src/app/about/page.tsx", "utf8");
+  const about = readFileSync("src/components/AboutContent.tsx", "utf8");
   const publicCopy = `${home}\n${about}`;
 
   assert.doesNotMatch(publicCopy, /GATHERER/u);
