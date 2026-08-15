@@ -80,6 +80,10 @@ alter table annotations alter column selected_text drop not null;
 alter table annotations add column if not exists scope text;
 alter table annotations add column if not exists title text;
 alter table annotations add column if not exists summary text;
+-- Cross-process CAS anchor: the SHA-256 fingerprint of the chapter body at
+-- last write. apply_chapter_update_guarded refuses to overwrite a chapter
+-- whose body_hash no longer matches the writer's expectation.
+alter table chapters add column if not exists body_hash text;
 
 create table if not exists generation_jobs (
   id uuid primary key,
@@ -451,18 +455,88 @@ returns text
 language sql
 stable
 as $$
-  select 'learnbyai-beta-2026-06-23-01'::text;
+  select 'learnbyai-beta-2026-06-23-02'::text;
+$$;
+
+-- Cross-process chapter-write CAS. Replaces the old read-check-write pattern:
+-- the web app and the generation worker are separate processes, so an
+-- in-memory lock cannot guard them. This RPC runs in one transaction:
+--   1. refuses to write when chapters.body_hash differs from the writer's
+--      expectation (stale companion/answers writes turn into a supersede);
+--   2. updates the chapter row with the new payload + body_hash;
+--   3. surgically replaces ONLY that chapter's element inside the course
+--      payload (jsonb_set by ordinal position) instead of rewriting the whole
+--      course payload, so a concurrent chapter update is never clobbered.
+create or replace function public.apply_chapter_update_guarded(
+  target_course_id uuid,
+  target_chapter_id uuid,
+  expected_body_hash text,
+  new_body_hash text,
+  chapter_payload jsonb,
+  new_updated_at timestamptz
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  current_hash text;
+  chapter_index bigint;
+begin
+  perform pg_advisory_xact_lock(hashtext(target_chapter_id::text)::bigint);
+
+  select body_hash
+  into current_hash
+  from public.chapters
+  where id = target_chapter_id;
+
+  if current_hash is not null
+     and expected_body_hash is not null
+     and current_hash <> expected_body_hash then
+    return false;
+  end if;
+
+  update public.chapters
+  set payload = chapter_payload,
+      body_hash = new_body_hash,
+      updated_at = new_updated_at
+  where id = target_chapter_id;
+
+  select pos - 1
+  into chapter_index
+  from public.courses c,
+       jsonb_array_elements(c.payload->'chapters') with ordinality as arr(ch, pos)
+  where c.id = target_course_id
+    and arr.ch->>'id' = target_chapter_id::text
+  limit 1;
+
+  if chapter_index is not null then
+    update public.courses
+    set payload = jsonb_set(
+          payload,
+          array['chapters', chapter_index::text],
+          chapter_payload
+        ),
+        updated_at = new_updated_at
+    where id = target_course_id;
+  end if;
+
+  return true;
+end;
 $$;
 
 revoke execute on function public.claim_generation_job(uuid, text, integer, integer, integer) from public, anon, authenticated;
 revoke execute on function public.reserve_usage_quota(uuid, text, integer, timestamptz, uuid, integer) from public, anon, authenticated;
 revoke execute on function public.commit_usage_quota_reservation(uuid) from public, anon, authenticated;
 revoke execute on function public.release_usage_quota_reservation(uuid) from public, anon, authenticated;
+revoke execute on function public.apply_chapter_update_guarded(uuid, uuid, text, text, jsonb, timestamptz) from public, anon, authenticated;
 
 grant execute on function public.claim_generation_job(uuid, text, integer, integer, integer) to service_role;
 grant execute on function public.reserve_usage_quota(uuid, text, integer, timestamptz, uuid, integer) to service_role;
 grant execute on function public.commit_usage_quota_reservation(uuid) to service_role;
 grant execute on function public.release_usage_quota_reservation(uuid) to service_role;
+grant execute on function public.apply_chapter_update_guarded(uuid, uuid, text, text, jsonb, timestamptz) to service_role;
 
 create index if not exists generation_jobs_runnable_idx
   on generation_jobs (status, locked_until, created_at);
@@ -474,6 +548,13 @@ create unique index if not exists generation_jobs_active_course_idx
 create unique index if not exists generation_jobs_active_chapter_idx
   on generation_jobs (chapter_id)
   where chapter_id is not null and type = 'chapter' and status in ('pending', 'queued', 'retrying', 'running');
+
+-- One active companion-guide job per chapter (legacy `lecture` type included):
+-- two racing tabs cannot create two guide jobs / burn quota twice. The API's
+-- 23505 recovery reads the existing job and returns it instead.
+create unique index if not exists generation_jobs_active_guide_idx
+  on generation_jobs (chapter_id)
+  where chapter_id is not null and type in ('companion-guide', 'lecture') and status in ('pending', 'queued', 'retrying', 'running');
 
 create index if not exists courses_user_created_idx
   on courses (user_id, created_at desc);

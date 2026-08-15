@@ -102,6 +102,7 @@ export async function saveServerCourse(course: Course, request?: Request) {
             status: chapter.status ?? "pending",
             order_index: index,
             payload: canonicalizeChapterForStorage(chapter),
+            body_hash: hashChapterContent(getChapterBody(chapter)),
             updated_at: nextCourse.updatedAt,
           }),
         ),
@@ -580,19 +581,28 @@ export async function updateChapterAnswersIfContentHashMatches(
     if (hashChapterContent(getChapterBody(chapter)) !== expectedContentHash) {
       return { applied: false, course: latestCourse };
     }
-    const updated = await saveServerChapterUpdate(
-      {
-        ...latestCourse,
-        chapters: latestCourse.chapters.map((item) =>
-          item.id === chapterId
-            ? { ...item, exerciseAnswers, exerciseAnswersSourceContentHash: expectedContentHash }
-            : item,
-        ),
-      },
-      chapterId,
-      request,
-    );
-    return { applied: true, course: updated };
+    try {
+      const updated = await saveServerChapterUpdate(
+        {
+          ...latestCourse,
+          chapters: latestCourse.chapters.map((item) =>
+            item.id === chapterId
+              ? { ...item, exerciseAnswers, exerciseAnswersSourceContentHash: expectedContentHash }
+              : item,
+          ),
+        },
+        chapterId,
+        request,
+        { expectedBodyHash: expectedContentHash },
+      );
+      return { applied: true, course: updated };
+    } catch (error) {
+      if (error instanceof ChapterUpdateConflictError) {
+        const freshCourse = await getServerCourse(courseId, request);
+        return { applied: false, course: freshCourse ?? latestCourse };
+      }
+      throw error;
+    }
   });
 }
 
@@ -620,17 +630,26 @@ export async function updateChapterCompanionIfContentHashMatches(
     if (hashChapterContent(getChapterBody(chapter)) !== expectedContentHash) {
       return { applied: false, course: latestCourse };
     }
-    const updated = await saveServerChapterUpdate(
-      {
-        ...latestCourse,
-        chapters: latestCourse.chapters.map((item) =>
-          item.id === chapterId ? { ...item, companionGuide } : item,
-        ),
-      },
-      chapterId,
-      request,
-    );
-    return { applied: true, course: updated };
+    try {
+      const updated = await saveServerChapterUpdate(
+        {
+          ...latestCourse,
+          chapters: latestCourse.chapters.map((item) =>
+            item.id === chapterId ? { ...item, companionGuide } : item,
+          ),
+        },
+        chapterId,
+        request,
+        { expectedBodyHash: expectedContentHash },
+      );
+      return { applied: true, course: updated };
+    } catch (error) {
+      if (error instanceof ChapterUpdateConflictError) {
+        const freshCourse = await getServerCourse(courseId, request);
+        return { applied: false, course: freshCourse ?? latestCourse };
+      }
+      throw error;
+    }
   });
 }
 
@@ -652,7 +671,12 @@ function canonicalizeCourseForStorage(course: Course): Course {
   return { ...course, chapters: course.chapters.map(canonicalizeChapterForStorage) };
 }
 
-async function saveServerChapterUpdate(course: Course, chapterId: string, request?: Request) {
+async function saveServerChapterUpdate(
+  course: Course,
+  chapterId: string,
+  request?: Request,
+  options?: { expectedBodyHash?: string },
+) {
   const userId = await resolveUserId(request);
   const nextCourse = {
     ...course,
@@ -671,31 +695,26 @@ async function saveServerChapterUpdate(course: Course, chapterId: string, reques
     return publishSavedCourse(nextCourse);
   }
 
-  await requireSupabaseWrite(
-    "Persist course",
-    () => supabase.from("courses").upsert({
-      id: nextCourse.id,
-      user_id: userId,
-      topic: nextCourse.topic,
-      goal: nextCourse.goal,
-      payload: canonicalizeCourseForStorage(nextCourse),
-      created_at: nextCourse.createdAt,
-      updated_at: nextCourse.updatedAt,
-    }),
-  );
-  await requireSupabaseWrite(
-    "Persist chapter",
-    () => supabase.from("chapters").upsert({
-      id: chapter.id,
-      course_id: nextCourse.id,
-      user_id: userId,
-      title: chapter.title,
-      status: chapter.status ?? "pending",
-      order_index: chapterIndex,
-      payload: canonicalizeChapterForStorage(chapter),
-      updated_at: nextCourse.updatedAt,
-    }),
-  );
+  // Cross-process CAS: the web app and the generation worker are separate
+  // processes, so the in-memory course lock cannot guard this write. The RPC
+  // refuses to overwrite a chapter whose body_hash drifted from the writer's
+  // expectation (stale companion/answers writes), and surgically replaces only
+  // this chapter's element inside the course payload instead of rewriting the
+  // whole payload — a concurrent chapter write can never be clobbered.
+  const storedChapter = canonicalizeChapterForStorage(chapter);
+  const newBodyHash = hashChapterContent(getChapterBody(chapter));
+  const { data: applied, error: rpcError } = await supabase.rpc("apply_chapter_update_guarded", {
+    target_course_id: nextCourse.id,
+    target_chapter_id: chapter.id,
+    expected_body_hash: options?.expectedBodyHash ?? null,
+    new_body_hash: newBodyHash,
+    chapter_payload: storedChapter,
+    new_updated_at: nextCourse.updatedAt,
+  });
+  assertSupabaseNoError("Persist chapter update", rpcError);
+  if (applied === false) {
+    throw new ChapterUpdateConflictError(chapterId);
+  }
 
   const qualityReport = chapter.qualityReport;
   if (qualityReport && isUuid(qualityReport.id) && isUuid(qualityReport.targetId)) {
@@ -739,6 +758,17 @@ async function saveServerChapterUpdate(course: Course, chapterId: string, reques
   }
 
   return publishSavedCourse(nextCourse);
+}
+
+/**
+ * Thrown when apply_chapter_update_guarded refused the write because the
+ * chapter body changed under the writer (cross-process hash CAS miss).
+ */
+export class ChapterUpdateConflictError extends Error {
+  constructor(public readonly chapterId: string) {
+    super(`Chapter ${chapterId} body hash changed; the guarded update was refused.`);
+    this.name = "ChapterUpdateConflictError";
+  }
 }
 
 export async function saveServerAnnotation(annotation: Annotation, request?: Request) {
@@ -1683,7 +1713,10 @@ export async function listServerLectureProgressForCourse(courseId: string, reque
       .order("updated_at", { ascending: false });
     assertSupabaseNoError("List companion progress", currentError);
 
-    // 旧表兜底读取：按 id 合并，新表行优先。
+    // 旧表兜底读取。按 chapterId 合并：新表（chapter_companion_progress）
+    // 优先；旧表只填补新表没有的章节；同一来源内出现重复时取 updatedAt
+    // 最新的一条——绝不按 id 合并（两表对同一章节使用不同 id 时旧记录
+    // 会把新记录顶掉）。
     const { data: legacy, error: legacyError } = await supabase
       .from("chapter_lecture_progress")
       .select("payload")
@@ -1692,23 +1725,34 @@ export async function listServerLectureProgressForCourse(courseId: string, reque
       .order("updated_at", { ascending: false });
     assertSupabaseNoError("List legacy lecture progress", legacyError);
 
-    const byId = new Map<string, CompanionProgress>();
-    for (const row of legacy ?? []) {
-      const progress = row.payload as CompanionProgress;
-      if (!byId.has(progress.id)) byId.set(progress.id, progress);
-    }
+    const byChapter = new Map<string, CompanionProgress>();
     for (const row of current ?? []) {
       const progress = row.payload as CompanionProgress;
-      byId.set(progress.id, progress);
+      const existing = byChapter.get(progress.chapterId);
+      if (!existing || Date.parse(progress.updatedAt) >= Date.parse(existing.updatedAt)) {
+        byChapter.set(progress.chapterId, progress);
+      }
     }
-    return [...byId.values()].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    for (const row of legacy ?? []) {
+      const progress = row.payload as CompanionProgress;
+      if (!byChapter.has(progress.chapterId)) {
+        byChapter.set(progress.chapterId, progress);
+      }
+    }
+    return [...byChapter.values()].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   }
 
   await hydrateLocalStore();
-  return [...localLectureProgress.values()]
-    .filter((progress) => progress.courseId === courseId)
-    .filter((progress) => progress.userId === userId || userId === "local-beta-user")
-    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  const byChapter = new Map<string, CompanionProgress>();
+  for (const progress of [...localLectureProgress.values()]
+    .filter((item) => item.courseId === courseId)
+    .filter((item) => item.userId === userId || userId === "local-beta-user")) {
+    const existing = byChapter.get(progress.chapterId);
+    if (!existing || Date.parse(progress.updatedAt) >= Date.parse(existing.updatedAt)) {
+      byChapter.set(progress.chapterId, progress);
+    }
+  }
+  return [...byChapter.values()].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
 async function hydrateLocalStore() {
@@ -1998,18 +2042,11 @@ async function requireSupabaseWrite(
 /**
  * Serialize writes to one course within THIS Node process.
  *
- * Known limitation: the queue lives in process memory, so it does not span
- * processes. Today's deployment (one web process + one worker loop) already
- * crosses this boundary, but the collision window is tiny and no data-loss
- * report exists; the fingerprint guards (exerciseAnswersSourceContentHash:
- * cleared on body change, validated on read) absorb the visible symptom.
- * Do NOT rely on this lock after scaling out.
- *
- * BEFORE adding a second worker instance / moving to serverless / any other
- * multi-process writer, replace the check-then-write paths with a database-
- * level CAS: add chapters.body_hash, an RPC that does SELECT ... FOR UPDATE
- * then a conditional update, and bump public.learnbyai_schema_version()
- * together with the smoke/health expectations.
+ * Cross-process safety now lives at the database: chapter updates go through
+ * the apply_chapter_update_guarded RPC, which refuses a write when
+ * chapters.body_hash drifted from the writer's expectation and surgically
+ * replaces only that chapter's element inside the course payload. This lock
+ * remains as the local-store (single-process) guard and a fast-path check.
  */
 async function withCourseUpdateLock<T>(courseId: string, operation: () => Promise<T>) {
   const previous = courseUpdateLocks.get(courseId) ?? Promise.resolve();
@@ -2089,12 +2126,20 @@ async function getConflictingActiveGenerationJob(job: GenerationJob, request?: R
   if (job.type === "chapter" && job.chapterId) {
     return getActiveServerGenerationJob("chapter_id", job.chapterId, "chapter", request);
   }
+  if ((job.type === "companion-guide" || job.type === "lecture") && job.chapterId) {
+    // One guide job per chapter across BOTH type strings (the partial unique
+    // index covers companion-guide + lecture), prefer the canonical type.
+    return (
+      (await getActiveServerGenerationJob("chapter_id", job.chapterId, "companion-guide", request))
+      ?? (await getActiveServerGenerationJob("chapter_id", job.chapterId, "lecture", request))
+    );
+  }
   return undefined;
 }
 
 function isActiveGenerationJobConflict(error: SupabaseErrorLike | null | undefined) {
   if (error?.code !== "23505") return false;
-  return /generation_jobs_active_(course|chapter)_idx/u.test(
+  return /generation_jobs_active_(course|chapter|guide)_idx/u.test(
     `${error.message ?? ""} ${error.details ?? ""} ${error.hint ?? ""}`,
   );
 }

@@ -8,7 +8,7 @@ const bucket = process.env.SUPABASE_EXPORTS_BUCKET || "learnbyai-exports";
 const testUserId = process.env.SUPABASE_SMOKE_USER_ID;
 const runRlsSmoke = process.env.SUPABASE_SMOKE_RLS === "true";
 const requireSmoke = process.env.SUPABASE_SMOKE_REQUIRED === "true";
-const expectedSchemaVersion = "learnbyai-beta-2026-06-23-01";
+const expectedSchemaVersion = "learnbyai-beta-2026-06-23-02";
 const expectedExportMimes = [
   "application/pdf",
   "application/x-tex",
@@ -396,6 +396,18 @@ async function assertClientCannotCallInternalRpcs(client, fixtures) {
       invoke: () =>
         client.rpc("release_usage_quota_reservation", {
           reservation_id: crypto.randomUUID(),
+        }),
+    },
+    {
+      name: "apply_chapter_update_guarded",
+      invoke: () =>
+        client.rpc("apply_chapter_update_guarded", {
+          target_course_id: fixtures.courseId,
+          target_chapter_id: fixtures.chapterId,
+          expected_body_hash: null,
+          new_body_hash: "forbidden",
+          chapter_payload: {},
+          new_updated_at: new Date().toISOString(),
         }),
     },
   ];

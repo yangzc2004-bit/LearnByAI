@@ -24,9 +24,9 @@ test("Supabase smoke checks the schema contract version from schema.sql", () => 
   const smoke = readFileSync(script, "utf8");
 
   assert.match(schema, /create or replace function public\.learnbyai_schema_version\(\)/);
-  assert.match(schema, /learnbyai-beta-2026-06-23-01/);
+  assert.match(schema, /learnbyai-beta-2026-06-23-02/);
   assert.match(smoke, /learnbyai_schema_version/);
-  assert.match(smoke, /learnbyai-beta-2026-06-23-01/);
+  assert.match(smoke, /learnbyai-beta-2026-06-23-02/);
   assert.match(smoke, /Supabase schema version mismatch/);
 });
 

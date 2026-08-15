@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Bot, MessageSquareQuote, SendHorizontal, Trash2, User, X } from "lucide-react";
 import { MarkdownContent } from "@/components/MarkdownContent";
@@ -49,14 +49,10 @@ export function TutorPanel({
 
   function submitQuestion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = event.currentTarget;
-    const input = form.elements.namedItem("question") as HTMLTextAreaElement;
-    const question = input.value;
+    const question = composerValue.trim();
+    if (!question) return;
     void tutor.ask(question).then((sent) => {
-      if (sent) {
-        input.value = "";
-        resizeComposer(input);
-      }
+      if (sent) setComposerValue("");
     }).catch(() => undefined);
   }
 
@@ -81,6 +77,13 @@ export function TutorPanel({
 
   const [threadToDelete, setThreadToDelete] = useState<Annotation>();
   const [deletingThreadId, setDeletingThreadId] = useState("");
+  // Controlled composer: a "继续追问" click must update the prefill even when
+  // the panel is already open (defaultValue would keep the stale question).
+  const [composerValue, setComposerValue] = useState(initialQuestion ?? "");
+
+  useEffect(() => {
+    if (initialQuestion) setComposerValue(initialQuestion);
+  }, [initialQuestion]);
 
   function confirmDeleteThread() {
     const annotation = threadToDelete;
@@ -245,7 +248,8 @@ export function TutorPanel({
           <div className="relative flex-1">
             <span className="pointer-events-none absolute left-3 top-2.5 font-mono text-[12px] text-primary">{">"}</span>
             <textarea
-          defaultValue={initialQuestion}
+              value={composerValue}
+              onChange={(event) => setComposerValue(event.currentTarget.value)}
               name="question"
               rows={1}
               onInput={(event) => resizeComposer(event.currentTarget)}

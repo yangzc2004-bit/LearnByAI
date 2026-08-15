@@ -92,6 +92,19 @@ export async function POST(
     message: "伴学指南生成已排队。",
   });
   const persistedJob = await saveServerGenerationJob(job, request);
+  if (persistedJob.id !== job.id) {
+    // 23505 recovery: the active-guide partial unique index rejected this
+    // insert because a concurrent request already created the chapter's
+    // guide job. Return that existing job instead of double-queuing.
+    return NextResponse.json(
+      {
+        course,
+        job: publicGenerationJob(persistedJob),
+        queued: true,
+      },
+      { status: 202 },
+    );
+  }
   const updatedCourse = await updateServerChapter(course, id, {
     companionGuide: { status: "queued" },
   }, request);

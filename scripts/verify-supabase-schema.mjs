@@ -4,7 +4,7 @@ import { join } from "node:path";
 const schemaPath = join(process.cwd(), "supabase", "schema.sql");
 const rawSql = readFileSync(schemaPath, "utf8");
 const compactSql = rawSql.toLowerCase().replace(/\s+/gu, " ");
-const expectedSchemaVersion = "learnbyai-beta-2026-06-23-01";
+const expectedSchemaVersion = "learnbyai-beta-2026-06-23-02";
 
 const tables = [
   "profiles",
@@ -42,6 +42,7 @@ const requiredSnippets = [
   "alter table annotations add column if not exists title text",
   "alter table annotations add column if not exists summary text",
   "alter table annotations alter column selected_text drop not null",
+  "alter table chapters add column if not exists body_hash text",
   'create policy "users can read own jobs"',
   'create policy "users can read own quality reports"',
   'create policy "users can read own exports"',
@@ -56,6 +57,7 @@ const requiredSnippets = [
   "attempts integer not null default 0",
   "create or replace function public.handle_new_user()",
   "create or replace function public.claim_generation_job(",
+  "create or replace function public.apply_chapter_update_guarded(",
   "create or replace function public.reserve_usage_quota(",
   "create or replace function public.commit_usage_quota_reservation(",
   "create or replace function public.release_usage_quota_reservation(",
@@ -64,14 +66,19 @@ const requiredSnippets = [
   "revoke execute on function public.reserve_usage_quota(uuid, text, integer, timestamptz, uuid, integer) from public, anon, authenticated",
   "revoke execute on function public.commit_usage_quota_reservation(uuid) from public, anon, authenticated",
   "revoke execute on function public.release_usage_quota_reservation(uuid) from public, anon, authenticated",
+  "revoke execute on function public.apply_chapter_update_guarded(uuid, uuid, text, text, jsonb, timestamptz) from public, anon, authenticated",
   "grant execute on function public.claim_generation_job(uuid, text, integer, integer, integer) to service_role",
   "grant execute on function public.reserve_usage_quota(uuid, text, integer, timestamptz, uuid, integer) to service_role",
   "grant execute on function public.commit_usage_quota_reservation(uuid) to service_role",
   "grant execute on function public.release_usage_quota_reservation(uuid) to service_role",
+  "grant execute on function public.apply_chapter_update_guarded(uuid, uuid, text, text, jsonb, timestamptz) to service_role",
   "create or replace function public.learnbyai_schema_version()",
   `select '${expectedSchemaVersion}'::text`,
   "status in ('pending', 'queued', 'retrying')",
   "generation_jobs_runnable_idx",
+  "generation_jobs_active_course_idx",
+  "generation_jobs_active_chapter_idx",
+  "generation_jobs_active_guide_idx",
   "courses_user_created_idx",
   "chapters_course_order_idx",
   "sections_chapter_order_idx",

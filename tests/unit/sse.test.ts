@@ -85,7 +85,7 @@ test("tutor panel exposes an explicit send button and error feedback", () => {
   assert.match(src, /SendHorizontal/u);
   assert.match(src, /aria-label="发送问题"/u);
   assert.match(src, /void tutor\.ask\(question\)\.then/u);
-  assert.match(src, /if \(sent\) \{\s+input\.value = ""/u);
+  assert.match(src, /if \(sent\) setComposerValue\(""\)/u);
   assert.match(src, /textarea[\s\S]*name="question"/u);
   assert.match(src, /Shift\+Enter|shiftKey/u);
   assert.match(src, /text-destructive/u);
