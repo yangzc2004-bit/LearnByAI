@@ -26,7 +26,10 @@ export function UserAvatar({
   const displayName = profile?.displayName?.trim();
 
   return (
-    <Avatar className={cn("size-8", className)}>
+    // Keyed by avatar presence: Radix keeps imageLoadingStatus="loaded" after
+    // an image unmounts, so removing an uploaded avatar would leave an empty
+    // circle. Remounting on source <-> bot transitions resets that state.
+    <Avatar key={source ?? "default-bot"} className={cn("size-8", className)}>
       {source ? (
         <AvatarImage
           key={source}
