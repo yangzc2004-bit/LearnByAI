@@ -3,6 +3,7 @@
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import type { UserProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { DefaultBotAvatar } from "./DefaultBotAvatar";
 
 type UserAvatarProps = {
   profile?: UserProfile | null;
@@ -23,7 +24,6 @@ export function UserAvatar({
 }: UserAvatarProps) {
   const source = avatarUrl ?? profile?.avatarUrl;
   const displayName = profile?.displayName?.trim();
-  const fallback = avatarFallback(displayName, email ?? profile?.email);
 
   return (
     <Avatar className={cn("size-8", className)}>
@@ -35,29 +35,14 @@ export function UserAvatar({
           className={cn("object-cover", imageClassName)}
         />
       ) : null}
-      <AvatarFallback className={cn("font-mono text-xs", fallbackClassName)}>
-        {fallback}
+      <AvatarFallback
+        className={cn(
+          "bg-gradient-to-br from-muted to-muted-foreground/15 text-muted-foreground",
+          fallbackClassName,
+        )}
+      >
+        <DefaultBotAvatar className="size-[58%]" />
       </AvatarFallback>
     </Avatar>
   );
-}
-
-function avatarFallback(displayName: string | undefined, email: string | null | undefined) {
-  const name = displayName?.trim();
-  if (name) {
-    const parts = name.split(/\s+/).filter(Boolean);
-    if (parts.length >= 2) {
-      return `${firstGlyph(parts[0])}${firstGlyph(parts[1])}`.toUpperCase();
-    }
-    return firstGlyph(name).toUpperCase();
-  }
-
-  const localPart = email?.trim().split("@")[0];
-  if (localPart) return firstGlyph(localPart).toUpperCase();
-
-  return "学";
-}
-
-function firstGlyph(value: string) {
-  return Array.from(value.trim())[0] ?? "";
 }
