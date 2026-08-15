@@ -422,15 +422,26 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
 }
 
 async function ensureIllustrationsBucket(supabase: NonNullable<ReturnType<typeof createSupabaseServiceClient>>) {
-  // Beta: the bucket is provisioned at runtime instead of in schema.sql; fold
-  // it into the schema contract (with a version bump) when this feature GAs.
-  const { error } = await supabase.storage.createBucket(ILLUSTRATIONS_BUCKET, {
+  const allowedMimeTypes = ["image/png", "image/jpeg", "image/webp", "image/svg+xml"];
+  const { error: createError } = await supabase.storage.createBucket(ILLUSTRATIONS_BUCKET, {
     public: false,
     fileSizeLimit: 10 * 1024 * 1024,
-    allowedMimeTypes: ["image/png", "image/jpeg", "image/webp", "image/svg+xml"],
+    allowedMimeTypes,
   });
-  if (error && !/already exist|duplicate/iu.test(error.message ?? "")) {
-    throw new Error(`Illustration bucket create failed: ${error.message}`);
+  if (!createError) return;
+  if (!/already exist|duplicate/iu.test(createError.message ?? "")) {
+    throw new Error(`Illustration bucket create failed: ${createError.message}`);
+  }
+
+  // Existing beta buckets may predate SVG support. createBucket only inserts;
+  // update the bucket in place so code-rendered SVG maps/figures can upload.
+  const { error: updateError } = await supabase.storage.updateBucket(ILLUSTRATIONS_BUCKET, {
+    public: false,
+    fileSizeLimit: 10 * 1024 * 1024,
+    allowedMimeTypes,
+  });
+  if (updateError) {
+    console.warn("Failed to refresh illustration bucket MIME types:", updateError.message);
   }
 }
 
