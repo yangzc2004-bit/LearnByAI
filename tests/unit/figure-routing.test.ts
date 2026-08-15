@@ -17,22 +17,21 @@ test("figureModeFor: user policy wins for intent-only figures", () => {
   assert.equal(figureModeFor(placeholder, false, "model"), "code");
 });
 
-test("figureModeFor: structured specs (diagramSpec + labels) always render as code", () => {
+test("figureModeFor: configured image models win for structured specs too", () => {
   const placeholder = { caption: "结构图", prompt: "画流程", diagramSpec: "A -> B", textLabelsAllowed: true };
-  // Even with an image model configured — and even under an explicit "model"
-  // course preference — structure figures stay programmatic SVG.
-  assert.equal(figureModeFor(placeholder, true, undefined), "code");
-  assert.equal(figureModeFor(placeholder, true, "model"), "code");
+  // Account image model available -> model generation, even for structured specs.
+  assert.equal(figureModeFor(placeholder, true, undefined), "model");
+  assert.equal(figureModeFor(placeholder, true, "model"), "model");
+  // No image model -> code rendering fallback.
   assert.equal(figureModeFor(placeholder, false, undefined), "code");
+  assert.equal(figureModeFor(placeholder, false, "model"), "code");
   assert.equal(figureModeFor(placeholder, true, "code"), "code");
   assert.equal(figureModeFor(placeholder, true, "off"), "off");
-  // diagramSpec WITHOUT label allowance still follows the model preference.
-  assert.equal(figureModeFor({ caption: "结构图", prompt: "画流程", diagramSpec: "A -> B" }, true, undefined), "model");
 });
 
-test("createTextbookMapFigure keeps the structure map on programmatic SVG even with an image API", async () => {
-  // The textbook map carries chapter titles + numbering as a structured spec:
-  // a configured image model must NOT get it (models garble numbers/titles).
+test("createTextbookMapFigure falls back to code rendering without account image config", async () => {
+  // No ModelOverrides.image is supplied here, so getUserImageModelConfig
+  // returns undefined and the textbook map must use programmatic SVG.
   const previousKey = process.env.ILLUSTRATION_API_KEY;
   process.env.ILLUSTRATION_API_KEY = "test-image-key";
   try {

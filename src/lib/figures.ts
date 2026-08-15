@@ -9,15 +9,12 @@ const FIGURE_BLOCK_RE = /:::learnbyai-figure[^\n]*\n([\s\S]*?)\n:::/gu;
 const MAX_FIGURE_CAPTION = 80;
 
 /**
- * Figure policy routing. The user's chosen course figureMode wins for
- * intent-only figures, BUT structured specs always render programmatically:
+ * Figure policy routing. The user's chosen course figureMode wins:
  * - "off": figures are stripped entirely (handled by the caller).
  * - "code": programmatic SVG for every figure.
- * - "model": AI image — except figures carrying a diagramSpec with labels
- *   allowed, which must be vector-crisp (models garble long titles, chapter
- *   numbering and arrow relations; the textbook map is the canonical case).
+ * - "model": AI image when an image model is configured; code SVG otherwise.
  * Default (undefined): AI image when an image model is configured, otherwise
- * programmatic SVG, with the same structure-spec exception.
+ * programmatic SVG.
  */
 export function figureModeFor(
   placeholder: FigurePlaceholder,
@@ -26,10 +23,9 @@ export function figureModeFor(
 ): ImageGenerationMode | "off" {
   if (courseMode === "off") return "off";
   if (courseMode === "code") return "code";
-  // Structured specs (diagramSpec chains with labels allowed) are always
-  // drawn as programmatic SVG — image models garble numbering, long titles
-  // and arrow relations in flowcharts.
-  if (placeholder.diagramSpec && placeholder.textLabelsAllowed) return "code";
+  // Model generation wins whenever the account has an image model configured,
+  // including structured figures such as the textbook map. Fall back to code
+  // rendering only when no image model is available.
   if (courseMode === "model") return modelAvailable ? "model" : "code";
   return modelAvailable ? "model" : "code";
 }
