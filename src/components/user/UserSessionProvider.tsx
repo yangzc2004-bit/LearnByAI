@@ -59,14 +59,17 @@ export function UserSessionProvider({ children }: { children: React.ReactNode })
     setProfileState(next);
   }, []);
 
+  const authState = user === undefined ? "loading" : user === null ? "signed-out" : "signed-in";
+  const userId = user?.id;
+
   useEffect(() => {
-    if (user === undefined) {
+    if (authState === "loading") {
       setProfileState(undefined);
       setProfileLoading(false);
       return;
     }
 
-    if (user === null) {
+    if (authState === "signed-out") {
       setProfileState(null);
       setProfileLoading(false);
       return;
@@ -74,7 +77,7 @@ export function UserSessionProvider({ children }: { children: React.ReactNode })
 
     setProfileLoading(true);
     void refreshProfile();
-  }, [user, refreshProfile]);
+  }, [authState, userId, refreshProfile]);
 
   const value = useMemo(
     () => ({
